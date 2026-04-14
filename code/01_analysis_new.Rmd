@@ -36,7 +36,6 @@ library(jsonlite)
 library(tableone)
 library(lmtest)
 
-
 # Read the YAML from the config folder
 project_root <- file.path( find_root(rprojroot::has_dir("deep_sedation_language_final")),
   "deep_sedation_language_final")
@@ -45,29 +44,27 @@ config <- yaml::read_yaml(file.path(project_root, "config", "deep_sedation_langu
 
 # Define directories based on YAML configuration
 data_dir <- config$data_dir
-output_dir <- config$output_dir
-intermediate_dir <- file.path(output_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
-final_data_dir <- file.path(output_dir, "UPLOAD_ME/")
+local_dir <- config$local_dir
+output_dir <- file.path(local_dir, "output/")
+intermediate_dir <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
+final_data_dir <- file.path(output_dir, "FINAL_DATA_UPLOAD_ME/")
 cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics")
 sedation_project <- file.path(final_data_dir, "sedation_project")
-sedation_tables_dir <- file.path(sedation_project, "final_tables/")  
+sedation_tables_dir <- file.path(sedation_project, "final_tables/")
 sedation_final_data <- file.path(sedation_project, "final_data/")
 paralytics_project <- file.path(final_data_dir, "paralytics_project")
 paralytics_tables_dir <- file.path(sedation_project, "final_tables/")  
 paralytics_final_data <- file.path(sedation_project, "final_data/")
-#second_dir <- file.path(output_dir, "secondary_project/")
 file_type <- config$file_type
 institution <- config$institution
 time_zone <- config$time_zone
 
-dirs_to_create <- c(intermediate_dir, final_data_dir, sedation_project, sedation_tables_dir, sedation_final_data, paralytics_project, paralytics_tables_dir, paralytics_final_data, cohort_characteristics)
+dirs_to_create <- c(output_dir, intermediate_dir, final_data_dir, sedation_project, sedation_tables_dir, sedation_final_data, paralytics_project, paralytics_tables_dir, paralytics_final_data, cohort_characteristics)
 for (dir in dirs_to_create) {
   if (!dir.exists(dir)) {
     dir.create(dir, recursive = TRUE)
   }
 }
-
-proj_end_date
 ```
 
 #Upload Data
@@ -139,20 +136,20 @@ total_cohort_table_one <- table1(~ age_at_admission + sex_category + ethnicity_c
 save_html(as.tags(total_cohort_table_one), file.path(sedation_tables_dir, paste0(institution, "_total_cohort_table_one_manuscript.html")))
 
 #Create paralytic_early_flag
-total_cohort[, paralytic_early_flag := fifelse(
-  (time_to_first_paralytic > 0) | (push_paralytics == 1),
-  1, 0)]
+#total_cohort[, paralytic_early_flag := fifelse(
+#  (time_to_first_paralytic > 0) | (push_paralytics == 1),
+#  1, 0)]
 
-setnafill(total_cohort, cols = "paralytic_early_flag", fill = 0)
+#setnafill(total_cohort, cols = "paralytic_early_flag", fill = 0)
 
 #Create Continuous Paralytic Flag
-total_cohort[, paralysis_cont := fifelse(
-  time_to_first_paralytic > 0 & time_to_first_paralytic <= 48,
-  1L, 0L
-)]
-setnafill(total_cohort, cols = "paralysis_cont", fill = 0)
+#total_cohort[, paralysis_cont := fifelse(
+#  time_to_first_paralytic > 0 & time_to_first_paralytic <= 48,
+#  1L, 0L
+#)]
+#setnafill(total_cohort, cols = "paralysis_cont", fill = 0)
 
-total_cohort[, benzos := fifelse(!is.na(loraz_median), 1, 0)]
+#total_cohort[, benzos := fifelse(!is.na(loraz_median), 1, 0)]
 ```
 
 # Cohort for Top 5 non-English, non-Spanish Language
@@ -489,11 +486,57 @@ fwrite(secondary_model_reintubation_results, file.path(final_data, paste0(instit
 
 ```
 
+
+#Exploratory Analysis: Propofol Dosing
+```{r}
+
+secondary_model_propofol <- lm(propofol_avg_mcgkgmin_48 ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = english_spanish_primary_analysis)
+
+summary(secondary_model_propofol)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+secondary_model_propofol_results <- data.frame(
+  term = names(coef(secondary_model_propofol)),
+  estimate = coef(secondary_model_propofol),
+  std.error = summary(secondary_model_propofol)$coefficients[, "Std. Error"],
+  variance = (summary(secondary_model_propofol)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(secondary_model_propofol)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(secondary_model_propofol_results, file.path(final_data, paste0(institution, "_secondary_analysis_vfd.csv")))
+
+```
+
+#Exploratory Analysis: Precedex Dosing
+```{r}
+
+secondary_model_precedex <- lm(dexmedetomidine_avg_mcgkghr_48 ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = english_spanish_primary_analysis)
+
+summary(secondary_model_precedex)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+secondary_model_precedex_results <- data.frame(
+  term = names(coef(secondary_model_precedex)),
+  estimate = coef(secondary_model_precedex),
+  std.error = summary(secondary_model_precedex)$coefficients[, "Std. Error"],
+  variance = (summary(secondary_model_precedex)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(secondary_model_precedex)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(secondary_model_precedex_results, file.path(final_data, paste0(institution, "_secondary_analysis_vfd.csv")))
+
+```
+
+
 #PARALYTIC ANALYSES
 
 #Whole Cohort
 ```{r}
-paralysis_all_three_lang_cont_total_cohort <- glm(paralysis_cont ~ language_category + race_category + ethnicity_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year), data = total_cohort, 
+paralysis_all_three_lang_cont_total_cohort <- glm(continuous_nmba_48 ~ language_category + race_category + ethnicity_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year), data = total_cohort, 
                                   family = binomial(link = "logit"))
 
 #Removed covid_status
@@ -524,7 +567,7 @@ fwrite(secondary_model_paralysis_all_three_lang_cont_results_total_cohort, file.
 
 #Secondary Analysis: Odds of Starting Continuous Paralysis in the first 48 hours
 ```{r}
-secondary_model_paralysis_cont <- glm(paralysis_cont ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2, data = english_spanish_primary_analysis, 
+secondary_model_paralysis_cont <- glm(continuous_nmba_48 ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2, data = english_spanish_primary_analysis, 
                                   family = binomial(link = "logit"))
 
 summary(secondary_model_paralysis_cont)
@@ -550,3 +593,41 @@ secondary_model_paralysis_cont_results
 fwrite(secondary_model_paralysis_cont_results, file.path(final_data, paste0(institution, "_secondary_analysis_paralysis_cont.csv")))
 ```
 
+#Plot
+library(data.table)
+
+dt <- copy(secondary_model_paralysis_all_three_lang_cont_results_total_cohort)
+setDT(dt)
+
+dt[, log_or := log(Odds_Ratio)]
+dt[, lower := exp(log_or - 1.96 * Std_Error)]
+dt[, upper := exp(log_or + 1.96 * Std_Error)]
+
+dt_lang <- dt[grepl("^language_category", Variable)]
+
+# Clean up labels (remove prefix)
+dt_lang[, language_label := gsub("^language_category", "", Variable)]
+
+# Optional: make nicer labels
+dt_lang[language_label == "", language_label := "Reference (English)"]
+
+dt_lang[, `:=`(
+  lower_plot = pmax(lower, 0.1),
+  upper_plot = pmin(upper, 10)
+)]
+library(ggplot2)
+
+ggplot(dt_lang, aes(x = Odds_Ratio, y = reorder(language_label, Odds_Ratio))) +
+  geom_errorbarh(aes(xmin = lower_plot, xmax = upper_plot), height = 0.2, linewidth = 0.6) +
+  geom_point(size = 2.5) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  coord_cartesian(xlim = c(0.1, 20)) +
+  labs(
+    title = "Odds of Paralytic Use by Language",
+    x = "Odds Ratio",
+    y = "Language Category"
+  ) +
+  theme_minimal()
+  
+  
