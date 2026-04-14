@@ -527,6 +527,10 @@ setorder(intermittent_meds, hospitalization_id, admin_dttm)
 resp_supp_imv_id <- respiratory_support[device_category == "imv"]
 imv_hospitalizations <- hospitalization[hospitalization_id %in% resp_supp_imv_id$hospitalization_id]
 
+# Filter Only for Hospitalizations with discharge_dttm before January 1st 2026
+cutoff_time <- as.POSIXct("2025-12-31 23:59:59", tz = time_zone)
+imv_hospitalizations <- imv_hospitalizations[discharge_dttm <= cutoff_time]
+
 # Pull All Hospitalizations for Patients with IMV at patient_id level
 imv_pat_id <- unique(imv_hospitalizations$patient_id)
 imv_hospitalizations_full_hx <- hospitalization[patient_id %in% imv_pat_id]
@@ -649,7 +653,7 @@ setorder(hospital_days, patient_id, calendar_date)
 #PART THREE: Create Full Cleaned Cohort
 ```{r}
 # Total Respiratory Support Table for IMV Hospitalizations
-respiratory_support_imv <- respiratory_support[hospitalization_id %in% resp_supp_imv_id$hospitalization_id]
+respiratory_support_imv <- respiratory_support[hospitalization_id %in% imv_hospitalizations$hospitalization_id]
 setorder(respiratory_support_imv, hospitalization_id, recorded_dttm)
 
 # Convert blank values in device_category to "NA"
@@ -2319,7 +2323,7 @@ final_cohort_imv_runs <- imv_runs_final_clean
 
 ```
 
-
+ 
 # PART FOUR: LAPS2
 ```{r}
 
@@ -4571,7 +4575,7 @@ diazepam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
 diazepam_total_48h[is.na(bolus_mg_48h),   bolus_mg_48h := 0]
 
 diazepam_total_48h[, diaz_total_48 := infusion_mg_48h + bolus_mg_48h]
-diazepam_total_48h <- diaz_total_48[, .(hospitalization_id, diaz_total_48)]
+diazepam_total_48h <- diaz_total_48h[, .(hospitalization_id, diaz_total_48)]
 
 # Merge in duration
 diazepam_total_48h <- merge(
@@ -5247,6 +5251,78 @@ total_timeline_primary[, pao2_imputed := {
 
 total_timeline_primary[, (cols_to_update_imv_total) := lapply(.SD, function(x) fifelse(x == "", NA, x)), .SDcols = cols_to_update_imv_total]
 
+# Determine ptof ratio just before starting paralytics
+###############################################################################
+setDT(total_timeline_primary)
+setDT(final_cohort_imv_runs_reduced)
+setorder(total_timeline_primary, hospitalization_id, recorded_dttm)
+
+# 1. LOCF pao2_imputed within hospitalization
+total_timeline_primary[
+  ,
+  pao2_imputed := na.locf(pao2_imputed, na.rm = FALSE),
+  by = hospitalization_id
+]
+
+# 2. Calculate P/F ratios
+total_timeline_primary[, p_to_f := po2_arterial / fio2_combined]
+total_timeline_primary[, p_to_f_imputed := pao2_imputed / fio2_combined]
+
+# 3. Keep only needed NMBA start times
+nmba_times <- summary_meds_data_final[
+  !is.na(continuous_nmba_start_48),
+  .(hospitalization_id, continuous_nmba_start_48)
+]
+
+# 4. Join timeline to NMBA table and keep rows in the 1 hour before NMBA start
+pf_candidates <- total_timeline_primary[
+  nmba_times,
+  on = .(hospitalization_id),
+  allow.cartesian = TRUE
+][
+  recorded_dttm <= continuous_nmba_start_48 &
+    recorded_dttm > (continuous_nmba_start_48 - 3600)
+]
+
+# 5. For each hospitalization, pick the most recent row in that 1-hour window
+#    Prefer measured p_to_f if available; otherwise use p_to_f_imputed
+pf_before_nmba <- pf_candidates[
+  order(hospitalization_id, continuous_nmba_start_48, -recorded_dttm)
+][
+  ,
+  {
+    measured_idx <- which(!is.na(p_to_f))[1]
+    
+    if (!is.na(measured_idx)) {
+      .(
+        pf_selected = p_to_f[measured_idx],
+        pf_source = "measured_p_to_f",
+        pf_recorded_dttm = recorded_dttm[measured_idx],
+        p_to_f = p_to_f[measured_idx],
+        p_to_f_imputed = p_to_f_imputed[measured_idx]
+      )
+    } else {
+      .(
+        pf_selected = p_to_f_imputed[1],
+        pf_source = "imputed_p_to_f",
+        pf_recorded_dttm = recorded_dttm[1],
+        p_to_f = p_to_f[1],
+        p_to_f_imputed = p_to_f_imputed[1]
+      )
+    }
+  },
+  by = .(hospitalization_id, continuous_nmba_start_48)
+]
+
+# 6. Merge back to your cohort table if desired
+summary_meds_data_final <- merge(
+  summary_meds_data_final,
+  pf_before_nmba,
+  by = c("hospitalization_id", "continuous_nmba_start_48"),
+  all.x = TRUE
+)
+###############################################################################
+
 total_timeline_locf_primary <- total_timeline_primary[, (cols_to_update_imv_total) := lapply(.SD, function(x) na.locf(x, na.rm = FALSE)), 
                  by = hospitalization_id, .SDcols = cols_to_update_imv_total]
 
@@ -5275,23 +5351,6 @@ columns_to_plot <- c("rass_value", "po2_arterial", "fio2_combined", "pao2_impute
 total_timeline_hourly_long <- total_timeline_hourly_primary %>%
   select_at(vars(one_of(columns_to_plot))) %>% 
   pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
-
-# Plot histograms
-histogram_plot <- ggplot(total_timeline_hourly_long, aes(x = Value)) +
-  geom_histogram(fill = "steelblue", color = "black", bins = 30) +
-  facet_wrap(~ Variable, scales = "free") +  # Adjust scales for continuous variables
-  theme_minimal() +
-  labs(title = "Histograms of Variables", x = "Value", y = "Frequency") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-#Save the Histogram
-#ggsave(
-#  filename = file.path(final_data, paste0("histograms_", institution, ".png")),
-#  plot = histogram_plot,
-#  width = 10,
-#  height = 6,
-#  dpi = 300
-#)
 
 #Sensitivity Analysis Numbers
 cols_to_update_imv_sensitivity <- c("hour_imv", "rass_value")
@@ -5393,7 +5452,7 @@ setnafill(sedation_and_imv_48, cols = "deep_sedation_count_total_48", fill = 0)
 
 sedation_and_imv_48[, percent_deep_sedation_48 := (deep_sedation_count_total_48 / hours_mechanically_ventilated_48) * 100]
 
-##########
+###############################################################################
 #Negative 1 Imputation Sensitivity Analysis
 # Deep Sedation Flag
 total_timeline_hourly_rass_sensitivity <- total_timeline_hourly_sensitivity[, 
@@ -5449,10 +5508,7 @@ primary_analysis_raw <- reduce(primary_analysis_tables, function(x, y) merge(x, 
 # Replace NA values in rass_below_minus_3_count with 0
 setnafill(primary_analysis_raw, cols = "rass_below_minus_3_count", fill = 0)
 
-#primary_analysis_raw_2 <- merge(primary_analysis_raw, paralytic_pushes_first_48h_final, by = "hospitalization_id", all.x = TRUE)
-#setnafill(primary_analysis_raw_2, cols = "push_paralytics", fill = 0)
-
-primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, top_five_non_eng_non_spanish, non_eng, three_language_cat, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, laps2, deep_sedation_weighted, deep_sedation_unweighted, rass_weighted_avg, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
+primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, top_five_non_eng_non_spanish, non_eng, three_language_cat, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, laps2, deep_sedation_weighted, rass_weighted_avg, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, pf_selected, pf_source, pf_recorded_dttm, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
 
 #Add Observation Year
 primary_analysis_analytic[, observation_year := year(begin_imv)]

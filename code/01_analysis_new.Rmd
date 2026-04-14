@@ -87,16 +87,592 @@ read_data <- function(file_path, select = NULL) {
 # Upload Analytic File
 total_cohort <- read_parquet(paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
 
-total_cohort$icu_imv <- factor(
-  total_cohort$icu_imv,
-  levels = c("cardiac_icu", "general_icu", "medical_icu", 
-             "mixed_cardiothoracic_icu", "mixed_neuro_icu", "neuro_icu", "neurosurgical_icu", "surgical_icu", "trauma_icu", "burn_icu", "cardiothoracic_surgical_icu"),
-  labels = c("Cardiac ICU", "General ICU", "Medical ICU", 
-             "Mixed Cardiothoracic ICU", "Mixed Neuro ICU", "Neuro ICU", "Neurosurgical ICU", "Surgical ICU", "Trauma ICU", "Burn ICU", "Cardiothoracic Surgical ICU")
-)
+#total_cohort$icu_imv <- factor(
+#  total_cohort$icu_imv,
+#  levels = c("cardiac_icu", "general_icu", "medical_icu", 
+#             "mixed_cardiothoracic_icu", "mixed_neuro_icu", "neuro_icu", "neurosurgical_icu", "surgical_icu", "trauma_icu", #"burn_icu", "cardiothoracic_surgical_icu"),
+#  labels = c("Cardiac ICU", "General ICU", "Medical ICU", 
+#             "Mixed Cardiothoracic ICU", "Mixed Neuro ICU", "Neuro ICU", "Neurosurgical ICU", "Surgical ICU", "Trauma ICU", "Burn #ICU", "Cardiothoracic Surgical ICU")
+#)
 
-catVars <- c("sex_category", "ethnicity_category", "race_category", "hospital_id", "icu_imv", "location_of_intubation")
+cat_vars <- c("sex_category", "ethnicity_category", "race_category", "hospital_id", "icu_imv", "location_of_intubation", "admission_type_category", "arf_flag", "arHf_flag")
 
+cont_vars <- c("age_at_admission", "bmi", "elixhauser_score", "SVM_SCORE", "laps2", "time_to_first_rass", "rass_frequency_hrs", "observation_year")
+
+```
+
+#Function to Create Table 1s
+```{r}
+#Table 1: Descriptive
+make_table1_federated <- function(dt,
+                                  cat_vars = NULL,
+                                  cont_vars = NULL,
+                                  by = NULL,
+                                  site_name = NA_character_) {
+  dt <- as.data.table(copy(dt))
+  out_list <- list()
+  
+  #-----------------------------#
+  # CATEGORICAL VARIABLES
+  #-----------------------------#
+  if (!is.null(cat_vars) && length(cat_vars) > 0) {
+    for (v in cat_vars) {
+      
+      if (!is.null(by)) {
+        tmp <- dt[, .(n = .N), by = c(by, v)]
+        
+        totals <- dt[, .(N = .N), by = by]
+        
+        tmp <- merge(tmp, totals, by = by, all.x = TRUE)
+        
+        setnames(tmp, old = by, new = "group")
+        setnames(tmp, old = v, new = "level")
+        
+        tmp[, `:=`(
+          site = site_name,
+          variable = v,
+          variable_type = "categorical",
+          level = as.character(level),
+          pct = 100 * n / N,
+          mean = NA_real_,
+          sd = NA_real_,
+          median = NA_real_,
+          p25 = NA_real_,
+          p75 = NA_real_,
+          min = NA_real_,
+          max = NA_real_
+        )]
+        
+      } else {
+        tmp <- dt[, .(n = .N), by = v]
+        total_n <- nrow(dt)
+        
+        setnames(tmp, old = v, new = "level")
+        
+        tmp[, `:=`(
+          site = site_name,
+          group = "overall",
+          variable = v,
+          variable_type = "categorical",
+          level = as.character(level),
+          N = total_n,
+          pct = 100 * n / N,
+          mean = NA_real_,
+          sd = NA_real_,
+          median = NA_real_,
+          p25 = NA_real_,
+          p75 = NA_real_,
+          min = NA_real_,
+          max = NA_real_
+        )]
+      }
+      
+      tmp <- tmp[, .(
+        site, group, variable, variable_type, level,
+        n, N, pct,
+        mean, sd, median, p25, p75, min, max
+      )]
+      
+      out_list[[paste0("cat_", v)]] <- tmp
+    }
+  }
+  
+  #-----------------------------#
+  # CONTINUOUS VARIABLES
+  #-----------------------------#
+  if (!is.null(cont_vars) && length(cont_vars) > 0) {
+    for (v in cont_vars) {
+      
+      if (!is.null(by)) {
+        tmp <- dt[, .(
+          n = sum(!is.na(get(v))),
+          N = .N,
+          pct = NA_real_,
+          mean = if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE),
+          sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
+          median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
+          p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
+          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE)),
+          min = if (all(is.na(get(v)))) NA_real_ else min(get(v), na.rm = TRUE),
+          max = if (all(is.na(get(v)))) NA_real_ else max(get(v), na.rm = TRUE)
+        ), by = by]
+        
+        setnames(tmp, old = by, new = "group")
+        
+        tmp[, `:=`(
+          site = site_name,
+          variable = v,
+          variable_type = "continuous",
+          level = NA_character_
+        )]
+        
+      } else {
+        tmp <- dt[, .(
+          n = sum(!is.na(get(v))),
+          N = .N,
+          pct = NA_real_,
+          mean = if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE),
+          sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
+          median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
+          p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
+          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE)),
+          min = if (all(is.na(get(v)))) NA_real_ else min(get(v), na.rm = TRUE),
+          max = if (all(is.na(get(v)))) NA_real_ else max(get(v), na.rm = TRUE)
+        )]
+        
+        tmp[, `:=`(
+          site = site_name,
+          group = "overall",
+          variable = v,
+          variable_type = "continuous",
+          level = NA_character_
+        )]
+      }
+      
+      tmp <- tmp[, .(
+        site, group, variable, variable_type, level,
+        n, N, pct,
+        mean, sd, median, p25, p75, min, max
+      )]
+      
+      out_list[[paste0("cont_", v)]] <- tmp
+    }
+  }
+  
+  out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
+  
+  setcolorder(out, c(
+    "site", "group", "variable", "variable_type", "level",
+    "n", "N", "pct", "mean", "sd", "median", "p25", "p75", "min", "max"
+  ))
+  
+  return(out[])
+}
+
+#Table 1: Comparative
+# Table 1: Comparative
+library(data.table)
+
+make_table1_comparisons <- function(dt,
+                                    by,
+                                    cont_vars = NULL,
+                                    cat_vars = NULL,
+                                    site_name = NA_character_,
+                                    group_levels = NULL,
+                                    fisher_if_expected_lt5 = TRUE) {
+  dt <- as.data.table(copy(dt))
+  
+  if (!(by %in% names(dt))) {
+    stop(sprintf("Grouping variable '%s' not found in dt.", by))
+  }
+  
+  # Keep only non-missing comparison groups
+  dt <- dt[!is.na(get(by))]
+  
+  # Force grouping variable to character first
+  dt[, (by) := as.character(get(by))]
+  
+  # Determine the two groups
+  observed_groups <- unique(dt[[by]])
+  observed_groups <- observed_groups[!is.na(observed_groups)]
+  
+  if (!is.null(group_levels)) {
+    if (length(group_levels) != 2) {
+      stop("group_levels must have length 2.")
+    }
+    if (!all(group_levels %in% observed_groups)) {
+      stop("Not all specified group_levels are present in the data.")
+    }
+    groups <- group_levels
+  } else {
+    if (length(observed_groups) != 2) {
+      stop(sprintf(
+        "Grouping variable '%s' must have exactly 2 non-missing groups. Found: %s",
+        by,
+        paste(observed_groups, collapse = ", ")
+      ))
+    }
+    groups <- sort(observed_groups)
+  }
+  
+  g1 <- groups[1]
+  g2 <- groups[2]
+  comparison_label <- paste0(by, ": ", g2, " vs ", g1)
+  
+  out_list <- list()
+  
+  #--------------------------------------------------#
+  # Helper: continuous variable comparison
+  #--------------------------------------------------#
+  compare_continuous <- function(x, group, var_name) {
+    dsub <- data.table(x = x, group = group)
+    dsub <- dsub[!is.na(group)]
+    
+    x1 <- dsub[group == g1, x]
+    x2 <- dsub[group == g2, x]
+    
+    x1_nonmiss <- x1[!is.na(x1)]
+    x2_nonmiss <- x2[!is.na(x2)]
+    
+    n1 <- length(x1_nonmiss)
+    n2 <- length(x2_nonmiss)
+    
+    mean1 <- if (n1 > 0) mean(x1_nonmiss) else NA_real_
+    mean2 <- if (n2 > 0) mean(x2_nonmiss) else NA_real_
+    sd1   <- if (n1 > 1) sd(x1_nonmiss) else NA_real_
+    sd2   <- if (n2 > 1) sd(x2_nonmiss) else NA_real_
+    med1  <- if (n1 > 0) median(x1_nonmiss) else NA_real_
+    med2  <- if (n2 > 0) median(x2_nonmiss) else NA_real_
+    p25_1 <- if (n1 > 0) as.numeric(quantile(x1_nonmiss, 0.25, na.rm = TRUE)) else NA_real_
+    p25_2 <- if (n2 > 0) as.numeric(quantile(x2_nonmiss, 0.25, na.rm = TRUE)) else NA_real_
+    p75_1 <- if (n1 > 0) as.numeric(quantile(x1_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
+    p75_2 <- if (n2 > 0) as.numeric(quantile(x2_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
+    
+    # Mean difference and CI from Welch t-test
+    estimate <- NA_real_
+    ci_lower <- NA_real_
+    ci_upper <- NA_real_
+    p_value  <- NA_real_
+    test_used <- NA_character_
+    
+    if (n1 >= 2 && n2 >= 2) {
+      tt <- try(t.test(x2_nonmiss, x1_nonmiss), silent = TRUE)
+      if (!inherits(tt, "try-error")) {
+        estimate <- unname(mean2 - mean1)
+        ci_lower <- unname(tt$conf.int[1])
+        ci_upper <- unname(tt$conf.int[2])
+        p_value  <- tt$p.value
+        test_used <- "welch_t_test"
+      }
+    }
+    
+    # SMD = difference in means / pooled SD
+    pooled_sd <- NA_real_
+    smd <- NA_real_
+    if (n1 >= 2 && n2 >= 2 && !is.na(sd1) && !is.na(sd2)) {
+      pooled_sd <- sqrt(((n1 - 1) * sd1^2 + (n2 - 1) * sd2^2) / (n1 + n2 - 2))
+      if (!is.na(pooled_sd) && pooled_sd > 0) {
+        smd <- (mean2 - mean1) / pooled_sd
+      }
+    }
+    
+    data.table(
+      site = site_name,
+      variable = var_name,
+      variable_type = "continuous",
+      comparison = comparison_label,
+      level = NA_character_,
+      group1 = g1,
+      group2 = g2,
+      group1_n = n1,
+      group2_n = n2,
+      group1_mean = mean1,
+      group2_mean = mean2,
+      group1_sd = sd1,
+      group2_sd = sd2,
+      group1_median = med1,
+      group2_median = med2,
+      group1_p25 = p25_1,
+      group2_p25 = p25_2,
+      group1_p75 = p75_1,
+      group2_p75 = p75_2,
+      statistic = "mean_difference",
+      estimate = estimate,
+      ci_lower = ci_lower,
+      ci_upper = ci_upper,
+      p_value = p_value,
+      smd = smd,
+      effect_measure = "mean_difference",
+      test = test_used,
+      note = NA_character_
+    )
+  }
+  
+  #--------------------------------------------------#
+  # Helper: multilevel categorical SMD
+  #--------------------------------------------------#
+  calc_multilevel_smd <- function(x, group, g1, g2) {
+    dsub <- data.table(
+      x = as.character(x),
+      group = as.character(group)
+    )
+    
+    dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
+    dsub[is.na(x), x := "missing"]
+    
+    levs <- sort(unique(dsub$x))
+    
+    # Need at least 2 levels
+    if (length(levs) < 2) return(NA_real_)
+    
+    # Use first level as reference, keep remaining K-1 levels
+    ref <- levs[1]
+    keep_levs <- levs[levs != ref]
+    
+    make_indicator_matrix <- function(vals, levels_keep) {
+      out <- sapply(levels_keep, function(lv) as.numeric(vals == lv))
+      if (is.null(dim(out))) {
+        out <- matrix(out, ncol = 1)
+        colnames(out) <- levels_keep
+      }
+      out
+    }
+    
+    x1 <- dsub[group == g1, x]
+    x2 <- dsub[group == g2, x]
+    
+    if (length(x1) < 2 || length(x2) < 2) return(NA_real_)
+    
+    M1 <- make_indicator_matrix(x1, keep_levs)
+    M2 <- make_indicator_matrix(x2, keep_levs)
+    
+    p1 <- colMeans(M1)
+    p2 <- colMeans(M2)
+    d  <- p2 - p1
+    
+    S1 <- stats::cov(M1)
+    S2 <- stats::cov(M2)
+    
+    if (is.null(dim(S1))) S1 <- matrix(S1, nrow = 1, ncol = 1)
+    if (is.null(dim(S2))) S2 <- matrix(S2, nrow = 1, ncol = 1)
+    
+    S_pooled <- (S1 + S2) / 2
+    
+    # Try regular inverse first; generalized inverse as fallback
+    S_inv <- try(solve(S_pooled), silent = TRUE)
+    if (inherits(S_inv, "try-error")) {
+      if (!requireNamespace("MASS", quietly = TRUE)) return(NA_real_)
+      S_inv <- try(MASS::ginv(S_pooled), silent = TRUE)
+      if (inherits(S_inv, "try-error")) return(NA_real_)
+    }
+    
+    smd <- as.numeric(sqrt(t(d) %*% S_inv %*% d))
+    smd
+  }
+  
+  #--------------------------------------------------#
+  # Helper: categorical variable comparison
+  #--------------------------------------------------#
+  compare_categorical <- function(x, group, var_name) {
+    dsub <- data.table(x = x, group = group)
+    dsub <- dsub[!is.na(group)]
+    
+    # treat missing category as its own level if present
+    dsub[, x := as.character(x)]
+    dsub[is.na(x), x := "missing"]
+    
+    tab <- table(dsub$x, dsub$group)
+    
+    # Ensure both groups are present as columns in correct order
+    needed_cols <- c(g1, g2)
+    if (!all(needed_cols %in% colnames(tab))) {
+      full_tab <- matrix(
+        0,
+        nrow = nrow(tab),
+        ncol = 2,
+        dimnames = list(rownames(tab), needed_cols)
+      )
+      common_cols <- intersect(colnames(tab), needed_cols)
+      full_tab[, common_cols] <- tab[, common_cols, drop = FALSE]
+      tab <- full_tab
+    } else {
+      tab <- tab[, needed_cols, drop = FALSE]
+    }
+    
+    n_levels <- nrow(tab)
+    n1 <- sum(tab[, g1])
+    n2 <- sum(tab[, g2])
+    
+    overall_smd <- calc_multilevel_smd(
+      x = dsub$x,
+      group = dsub$group,
+      g1 = g1,
+      g2 = g2
+    )
+    
+    p_value <- NA_real_
+    test_used <- NA_character_
+    
+    if (n_levels >= 1) {
+      chisq_try <- try(chisq.test(tab, correct = FALSE), silent = TRUE)
+      
+      if (!inherits(chisq_try, "try-error")) {
+        expected <- chisq_try$expected
+        
+        if (fisher_if_expected_lt5 && any(expected < 5)) {
+          fisher_try <- try(fisher.test(tab), silent = TRUE)
+          if (!inherits(fisher_try, "try-error")) {
+            p_value <- fisher_try$p.value
+            test_used <- "fisher_exact"
+          } else {
+            p_value <- chisq_try$p.value
+            test_used <- "chi_square"
+          }
+        } else {
+          p_value <- chisq_try$p.value
+          test_used <- "chi_square"
+        }
+      }
+    }
+    
+    # Overall categorical row for all categorical variables
+    out <- data.table(
+      site = site_name,
+      variable = var_name,
+      variable_type = "categorical",
+      comparison = comparison_label,
+      level = NA_character_,
+      group1 = g1,
+      group2 = g2,
+      group1_n = n1,
+      group2_n = n2,
+      group1_mean = NA_real_,
+      group2_mean = NA_real_,
+      group1_sd = NA_real_,
+      group2_sd = NA_real_,
+      group1_median = NA_real_,
+      group2_median = NA_real_,
+      group1_p25 = NA_real_,
+      group2_p25 = NA_real_,
+      group1_p75 = NA_real_,
+      group2_p75 = NA_real_,
+      statistic = "overall_difference",
+      estimate = NA_real_,
+      ci_lower = NA_real_,
+      ci_upper = NA_real_,
+      p_value = p_value,
+      smd = overall_smd,
+      effect_measure = "categorical_smd",
+      test = test_used,
+      note = NA_character_
+    )
+    
+    # If binary categorical, also compute risk difference and binary SMD
+    if (n_levels == 2) {
+      levels_x <- rownames(tab)
+      ref_level <- levels_x[1]
+      target_level <- levels_x[2]
+      
+      a <- as.numeric(tab[target_level, g2])  # target in group2
+      b <- as.numeric(tab[ref_level,   g2])   # ref in group2
+      c <- as.numeric(tab[target_level, g1])  # target in group1
+      d <- as.numeric(tab[ref_level,   g1])   # ref in group1
+      
+      p1 <- if ((c + d) > 0) c / (c + d) else NA_real_
+      p2 <- if ((a + b) > 0) a / (a + b) else NA_real_
+      
+      # Risk difference
+      rd <- if (!is.na(p1) && !is.na(p2)) p2 - p1 else NA_real_
+      rd_se <- if (!is.na(p1) && !is.na(p2) && (c + d) > 0 && (a + b) > 0) {
+        sqrt((p1 * (1 - p1) / (c + d)) + (p2 * (1 - p2) / (a + b)))
+      } else {
+        NA_real_
+      }
+      rd_lcl <- if (!is.na(rd_se)) rd - 1.96 * rd_se else NA_real_
+      rd_ucl <- if (!is.na(rd_se)) rd + 1.96 * rd_se else NA_real_
+      
+      # Binary SMD
+      pooled_p <- if (!is.na(p1) && !is.na(p2)) (p1 + p2) / 2 else NA_real_
+      smd_binary <- if (!is.na(pooled_p) && pooled_p > 0 && pooled_p < 1) {
+        (p2 - p1) / sqrt(pooled_p * (1 - pooled_p))
+      } else {
+        NA_real_
+      }
+      
+      out_rd <- data.table(
+        site = site_name,
+        variable = var_name,
+        variable_type = "categorical",
+        comparison = comparison_label,
+        level = target_level,
+        group1 = g1,
+        group2 = g2,
+        group1_n = n1,
+        group2_n = n2,
+        group1_mean = p1,
+        group2_mean = p2,
+        group1_sd = NA_real_,
+        group2_sd = NA_real_,
+        group1_median = NA_real_,
+        group2_median = NA_real_,
+        group1_p25 = NA_real_,
+        group2_p25 = NA_real_,
+        group1_p75 = NA_real_,
+        group2_p75 = NA_real_,
+        statistic = "risk_difference",
+        estimate = rd,
+        ci_lower = rd_lcl,
+        ci_upper = rd_ucl,
+        p_value = p_value,
+        smd = smd_binary,
+        effect_measure = "risk_difference",
+        test = test_used,
+        note = sprintf(
+          "Binary categorical variable. level='%s' treated as event.",
+          target_level
+        )
+      )
+      
+      out <- rbind(out, out_rd, fill = TRUE)
+      
+    } else if (n_levels > 2) {
+      out[, note := "Multi-level categorical variable: overall p-value and omnibus SMD reported; CI not populated."]
+    }
+    
+    out
+  }
+  
+  #--------------------------------------------------#
+  # Run continuous variables
+  #--------------------------------------------------#
+  if (!is.null(cont_vars) && length(cont_vars) > 0) {
+    for (v in cont_vars) {
+      if (!(v %in% names(dt))) {
+        warning(sprintf("Continuous variable '%s' not found. Skipping.", v))
+        next
+      }
+      out_list[[paste0("cont_", v)]] <- compare_continuous(
+        x = dt[[v]],
+        group = dt[[by]],
+        var_name = v
+      )
+    }
+  }
+  
+  #--------------------------------------------------#
+  # Run categorical variables
+  #--------------------------------------------------#
+  if (!is.null(cat_vars) && length(cat_vars) > 0) {
+    for (v in cat_vars) {
+      if (!(v %in% names(dt))) {
+        warning(sprintf("Categorical variable '%s' not found. Skipping.", v))
+        next
+      }
+      out_list[[paste0("cat_", v)]] <- compare_categorical(
+        x = dt[[v]],
+        group = dt[[by]],
+        var_name = v
+      )
+    }
+  }
+  
+  out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
+  
+  setcolorder(out, c(
+    "site", "variable", "variable_type", "comparison", "level",
+    "group1", "group2",
+    "group1_n", "group2_n",
+    "group1_mean", "group2_mean",
+    "group1_sd", "group2_sd",
+    "group1_median", "group2_median",
+    "group1_p25", "group2_p25",
+    "group1_p75", "group2_p75",
+    "statistic", "estimate", "ci_lower", "ci_upper",
+    "p_value", "smd", "effect_measure", "test", "note"
+  ))
+  
+  return(out[])
+}
 ```
 
 #IPW Calculation
@@ -109,7 +685,7 @@ ipw_outcome <- total_cohort[, .(
 ipw_sensitivity_analysis <- merge(total_cohort, ipw_outcome, by = "hospitalization_id")
 
 # Use patient-level covariates to predict censoring
-ipw_model <- glm(reached_48h ~ age_category + sex_category + race_category + ethnicity_category + laps2 + factor(hospital_icu_id) + elixhauser_score,
+ipw_model <- glm(reached_48h ~ age_category + sex_category + race_category + ethnicity_category + laps2 + factor(hospital_icu_id) + elixhauser_score + factor(observation_year),
                  data = unique(ipw_sensitivity_analysis, by = "hospitalization_id"),
                  family = binomial())
 
@@ -128,28 +704,34 @@ total_cohort$sex_category <- relevel(as.factor(total_cohort$sex_category), ref =
 total_cohort$race_category <- relevel(as.factor(total_cohort$race_category), ref = "white")
 total_cohort$ethnicity_category <- relevel(as.factor(total_cohort$ethnicity_category), ref = "non-hispanic")
 
-#Basic Table One
-# Generate the summary table grouped by language
-total_cohort_table_one <- table1(~ age_at_admission + sex_category + ethnicity_category + race_category + bmi + laps2 + hospital_id + icu_imv | non_eng, data = total_cohort, factorVars = catVars, test = TRUE)
+#Descriptive Table One
+table1_english_v_nonenglish_cohort_csv <- make_table1_federated(
+  dt = total_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "non_eng",   
+  site_name = institution
+)
 
-# Convert to HTML and save as file
-save_html(as.tags(total_cohort_table_one), file.path(sedation_tables_dir, paste0(institution, "_total_cohort_table_one_manuscript.html")))
+fwrite(
+  table1_english_v_nonenglish_cohort_csv,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_english_v_nonenglish_cohort_descriptive.csv"))
+)
 
-#Create paralytic_early_flag
-#total_cohort[, paralytic_early_flag := fifelse(
-#  (time_to_first_paralytic > 0) | (push_paralytics == 1),
-#  1, 0)]
+#Comparison Table One
+table1_english_v_nonenglish_cohort_comparisons <- make_table1_comparisons(
+  dt = total_cohort,
+  by = "non_eng",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution,
+  group_levels = c("english", "non_english")
+)
 
-#setnafill(total_cohort, cols = "paralytic_early_flag", fill = 0)
-
-#Create Continuous Paralytic Flag
-#total_cohort[, paralysis_cont := fifelse(
-#  time_to_first_paralytic > 0 & time_to_first_paralytic <= 48,
-#  1L, 0L
-#)]
-#setnafill(total_cohort, cols = "paralysis_cont", fill = 0)
-
-#total_cohort[, benzos := fifelse(!is.na(loraz_median), 1, 0)]
+fwrite(
+  table1_english_v_nonenglish_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_english_v_nonenglish_cohort_comparisons.csv"))
+)
 ```
 
 # Cohort for Top 5 non-English, non-Spanish Language
@@ -162,11 +744,18 @@ top_five_cohort$race_category <- relevel(as.factor(top_five_cohort$race_category
 top_five_cohort$ethnicity_category <- relevel(as.factor(top_five_cohort$ethnicity_category), ref = "non-hispanic")
 
 #Basic Table One
-# Generate the summary table grouped by language
-top_five_table_one <- table1(~ age_at_admission + sex_category + ethnicity_category + race_category + bmi + laps2 + hospital_id + icu_imv | top_five_non_eng_non_spanish, data = top_five_cohort, factorVars = catVars, test = TRUE)
+table1_top5_cohort_csv <- make_table1_federated(
+  dt = total_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "top_five_non_eng_non_spanish",   # or NULL if overall only
+  site_name = institution
+)
 
-# Convert to HTML and save as file
-save_html(as.tags(top_five_table_one), file.path(sedation_tables_dir, paste0(institution, "_top_five_cohort_table_one_manuscript.html")))
+fwrite(
+  table1_total_cohort_csv,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_federated.csv"))
+)
 ```
 
 # Cohort for Sensitivity Analysis Involving All Spanish/English Pts regardless of ICU of admission
