@@ -480,6 +480,18 @@ patient_demographics[, sex_category := tolower(sex_category)]
 patient_demographics[, race_category := tolower(race_category)]
 patient_demographics[, ethnicity_category := tolower(ethnicity_category)]
 
+# Cohort Wide Language Counts
+language_counts_hospital_system <- patient_demographics[
+  !language_category %in% c(""), 
+  .N, 
+  by = language_category
+][
+  , percent := 100 * N / sum(N)
+][
+  order(-N)
+]
+fwrite(language_counts_hospital_system, file.path(cohort_characteristics, paste0(institution, "_hospital_system_language_counts.csv")))
+
 #ADT
 adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
 setorder(adt, hospitalization_id, in_dttm) 
@@ -1697,8 +1709,6 @@ patient_bmi_data_final <- patient_bmi_data_clean[hospitalization_id %in% imv_run
 patient_bmi_data_final <- patient_bmi_data_final[!is.na(bmi)]
 
 imv_runs_final <- merge(imv_runs_final, patient_bmi_data_final, by = "hospitalization_id", all = TRUE)
-#imv_runs_final <- unique(imv_runs_final, by = c("hospitalization_id"))
-
 
 
 ################################################################################
@@ -1707,51 +1717,51 @@ hospitalization_table_part_five <- hospitalization[hospitalization_id %in% imv_r
 patient_language <- patient_demographics[patient_id %in% hospitalization_table_part_five$patient_id]
 
 # Step 1: Count and sort languages, excluding "English", Unknown, and sign language
-language_counts <- patient_language[
-  !language_category %in% c("english", "unknown or na", "sign language", "spanish"), 
+language_counts_cohort <- patient_language[
+  !language_category %in% c(""), 
   .N, 
   by = language_category
 ][order(-N)]
-fwrite(language_counts, file.path(cohort_characteristics, paste0(institution, "_non_english_language_counts.csv")))
+fwrite(language_counts_cohort, file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
 
 # Get the top 5 most common languages
-top_languages <- language_counts[1:5, language_category]
+#top_languages <- language_counts[1:5, language_category]
 
 # Non-English-non-spanish Language
-non_english_non_spanish_language <- patient_language[
-  !language_category %in% c("english", "unknown or na", "spanish", "sign language"), 
-  .N, 
-  by = language_category
-][order(-N)]
+#non_english_non_spanish_language <- patient_language[
+#  !language_category %in% c("english", "unknown or na", "spanish", "sign language"), 
+#  .N, 
+#  by = language_category
+#][order(-N)]
 
 # Add top_five flag to patient_language
-patient_language[, top_five := language_category %in% top_languages]
+#patient_language[, top_five := language_category %in% top_languages]
 
-patient_language[, non_eng_non_span := language_category %in% non_english_non_spanish_language$language_category]
+#patient_language[, non_eng_non_span := language_category %in% non_english_non_spanish_language$language_category]
 
-patient_language[, top_five_non_eng_non_spanish := fifelse(
-  top_five == TRUE, 
-  "top_five_non_eng_non_spanish",
-  fifelse(language_category == "english", 
-          "english", 
-          fifelse(language_category == "spanish", 
-                  "spanish", 
-                  NA_character_))
-)]
+#patient_language[, top_five_non_eng_non_spanish := fifelse(
+#  top_five == TRUE, 
+#  "top_five_non_eng_non_spanish",
+#  fifelse(language_category == "english", 
+#          "english", 
+#          fifelse(language_category == "spanish", 
+#                  "spanish", 
+#                  NA_character_))
+#)]
 
-patient_language[, .N, by = top_five_non_eng_non_spanish][order(-N)]
+#patient_language[, .N, by = top_five_non_eng_non_spanish][order(-N)]
 
-patient_language[, non_eng := ifelse(language_category == "english", "english", "non_english")]
+#patient_language[, non_eng := ifelse(language_category == "english", "english", "non_english")]
 
-patient_language[, three_language_cat := fifelse(
-  non_eng_non_span == TRUE, 
-  "non_eng_non_span",
-  fifelse(language_category == "english", 
-          "english", 
-          fifelse(language_category == "spanish", 
-                  "spanish", 
-                  NA_character_))
-)]
+#patient_language[, three_language_cat := fifelse(
+#  non_eng_non_span == TRUE, 
+#  "non_eng_non_span",
+#  fifelse(language_category == "english", 
+#          "english", 
+#          fifelse(language_category == "spanish", 
+#                  "spanish", 
+#                  NA_character_))
+#)]
 
 #Merge Back
 demographics_final <- merge(hospitalization_table_part_five, patient_language, by = "patient_id", all = TRUE)
@@ -1782,27 +1792,8 @@ if (!"SVM_SCORE" %in% names(demographics_final)) {
   )
 }
 
-#Clean Out Unknown Languages, Missing Demographic Info, and People Under 18 or over 120
-demographics_clean_language <- demographics_final[
-  language_category != "unknown or na" &
-  language_category != "sign language"
-]
-
-demographics_clean_categories <- demographics_clean_language[
-  sex_category != "unknown" &
-  !is.na(SVM_SCORE) & SVM_SCORE != "" &
-  !is.na(sex_category) & sex_category != "" &
-  !is.na(race_category) & race_category != "" &
-  !is.na(ethnicity_category) & ethnicity_category != ""
-]
-
-demographics_clean_age <- demographics_clean_categories[
-  age_at_admission >= 18 & age_at_admission < 120
-]
-
-
-#Age Category
-demographics_clean_age <- demographics_clean_age %>%
+# Create Age Category
+demographics_clean_age <- demographics_final %>%
   mutate(age_category = case_when(
     age_at_admission >= 18 & age_at_admission < 35 ~ "18-34 Years",
     age_at_admission >= 35 & age_at_admission < 50 ~ "35-49 Years",
@@ -1814,8 +1805,9 @@ demographics_clean_age <- demographics_clean_age %>%
   ))
 setDT(demographics_clean_age)
 
-demographics_clean_final <- demographics_clean_age[, .(hospitalization_id, patient_id, admission_dttm, discharge_dttm, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, death_dttm, language_category, top_five_non_eng_non_spanish, non_eng, three_language_cat, SVM_SCORE)]
+demographics_clean_final <- demographics_clean_age[, .(hospitalization_id, patient_id, admission_dttm, discharge_dttm, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, death_dttm, language_category, SVM_SCORE)]
 
+# Re-categorize race and ethnicity
 demographics_clean_final[, race_category := as.character(race_category)]
 demographics_clean_final[, race_category := fifelse(
   race_category %in% c("american indian or alaska native", "native hawaiian or other pacific islander", "unknown", "other"),
@@ -2038,8 +2030,6 @@ set(imv_runs_final, j = "hospital_icu_id",
                   imv_runs_final$icu_imv, sep = "_"))
 
 ###############################################################################
-
-
 # Start with a copy so the original table stays unchanged
 imv_runs_cleaned <- copy(imv_runs_final)
 
@@ -2094,16 +2084,17 @@ imv_runs_step7b <- imv_runs_step7[!is.na(hospital_icu_id)]
 n_after_step7b <- nrow(imv_runs_step7b)
 n_removed_step7b <- n_after_step7 - n_after_step7b
 
-#Step 8: Removed for missing language
-imv_runs_step8 <- imv_runs_step7[!is.na(language_category) & language_category != "unknown"]
+#Step 8: Removed for missing, unknown, or non-verbal language
+imv_runs_step8 <- imv_runs_step7[!is.na(language_category) & language_category != "unknown or na" & language_category != "sign language" & language_category != ""]
 n_after_step8 <- nrow(imv_runs_step8)
 n_removed_step8 <- n_after_step7 - n_after_step8
 
 #Step 9: Removed for blank/missing ethnicity, race, sex categories
 imv_runs_step9 <- imv_runs_step8[
-  !is.na(ethnicity_category) &
-  !is.na(race_category) &
-  !is.na(sex_category) &
+  !is.na(ethnicity_category) & ethnicity_category != "" &
+  !is.na(race_category) & race_category != "" &
+  !is.na(SVM_SCORE) & SVM_SCORE != "" &
+  !is.na(sex_category) & sex_category != "" &
   tolower(sex_category) != "unknown"
 ]
 n_after_step9 <- nrow(imv_runs_step9)
@@ -2187,7 +2178,6 @@ filter_tab_final
 
 fwrite(filter_tab_final, file.path(cohort_characteristics, paste0(institution, "_cohort_cleaning_summary.csv")))
 ################################################################################
-
 # Calculate HFDs, VFDs, ICUFDs
 # Correct any death_dttm errors first
 imv_runs_final_clean[death_dttm < discharge_dttm & discharge_category == "expired",
@@ -2258,9 +2248,29 @@ for (col in c("hospital_days_28", "icu_days_28", "vent_days_28")) {
   imv_runs_final_clean[is.na(get(col)), (col) := 0L]
 }
 
-imv_runs_final_clean[, hospital_free_days_28 := eligible_days - hospital_days_28]
-imv_runs_final_clean[, icu_free_days_28      := eligible_days - icu_days_28]
-imv_runs_final_clean[, vent_free_days_28     := eligible_days - vent_days_28]
+###28-Day Mortality
+imv_runs_final_clean[, mortality_28day := !is.na(death_date) & death_date <= (begin_imv_date + 27)]
+
+imv_runs_final_clean[, days_28 := 28L]
+
+imv_runs_final_clean[, hospital_free_days_28 := days_28 - hospital_days_28]
+imv_runs_final_clean[, icu_free_days_28      := days_28 - icu_days_28]
+imv_runs_final_clean[, vent_free_days_28     := days_28 - vent_days_28]
+
+imv_runs_final_clean[mortality_28day == TRUE,
+  `:=`(
+    hospital_free_days_28 = 0L,
+    icu_free_days_28 = 0L,
+    vent_free_days_28 = 0L
+  )
+]
+
+# Alternative VFD: assign -1 for death instead of 0
+imv_runs_final_clean[, vent_free_days_28_alt := vent_free_days_28]
+
+imv_runs_final_clean[mortality_28day == TRUE,
+  vent_free_days_28_alt := -1L
+]
 
 # -----------------------------
 # 6-month hospital-free days
@@ -2315,9 +2325,13 @@ imv_runs_final_clean[is.na(hospital_days_6mo), hospital_days_6mo := 0L]
 # Calculate 6-month hospital-free days
 imv_runs_final_clean[, hospital_free_days_6mo := eligible_days_6mo - hospital_days_6mo]
 
+# 6-month mortality
+imv_runs_final_clean[, mortality_6mo := !is.na(death_date) & death_date <= window_end_6mo]
 
-###28-Day Mortality
-imv_runs_final_clean[, mortality_28day := !is.na(death_date) & death_date <= (begin_imv_date + 27)]
+# Assign 0 hospital-free days to patients who die within 6 months
+imv_runs_final_clean[mortality_6mo == TRUE,
+  hospital_free_days_6mo := 0L
+]
 
 final_cohort_imv_runs <- imv_runs_final_clean
 
@@ -3418,1391 +3432,3091 @@ laps2_missing_percent <- laps2_missing_summary %>%
     pct_missing_gcs = mean(missing_gcs) * 100
   )
 
-final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, top_five_non_eng_non_spanish, non_eng, three_language_cat, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, laps2, deep_sedation_weighted, deep_sedation_unweighted, rass_weighted_avg, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours)]
+final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted, deep_sedation_unweighted, rass_weighted_avg, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours)]
 
 # Save the Missing results to a file
 fwrite(laps2_missing_percent, file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
 
 #Save Point
-write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
+#write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
 ```
 
-# PART FIVE: Calculate Med Doses in First 48 hours
+# PART FIVE: Calculate Med Doses, Paralytics, etc in First 48 hours of IMV
 ```{r}
 #Save Point Code if need to re-run and don't want to re-run LAPS2 can simply run parts 0-3 to upload tables/directories then remove # before code below and start here.
 #final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
 
+################################################################################
+# Define functions to look up meds - robust to missing meds
+################################################################################
+empty_med_table <- function(cols) {
+  dt <- copy(final_cohort_imv_runs[0, .(hospitalization_id)])
+  
+  for (nm in setdiff(cols, "hospitalization_id")) {
+    if (grepl("start|dttm|time", nm, ignore.case = TRUE)) {
+      dt[, (nm) := as.POSIXct(character())]
+    } else {
+      dt[, (nm) := numeric()]
+    }
+  }
+  
+  dt
+}
 
-# Propofol
-propofol_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "propofol"]
-propofol_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "propofol"]
-propofol_combined <- merge(propofol_cont, propofol_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
+safe_merge_meds <- function(tables, cohort_ids) {
+  tables <- tables[!vapply(tables, is.null, logical(1))]
+  
+  if (length(tables) == 0) {
+    out <- unique(cohort_ids[, .(hospitalization_id)])
+    return(out)
+  }
+  
+  out <- Reduce(function(x, y) merge(x, y, by = "hospitalization_id", all = TRUE), tables)
+  
+  out <- merge(
+    unique(cohort_ids[, .(hospitalization_id)]),
+    out,
+    by = "hospitalization_id",
+    all.x = TRUE
+  )
+  
+  out
+}
 
-propofol_expanded <- merge(propofol_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-propofol_expanded <- propofol_expanded[!is.na(med_dose)]
-#propofol_expanded <- propofol_expanded[!mar_action_name == "missed"]
+safe_med_eval <- function(expr, empty_cols, med_name = "unknown") {
+  tryCatch(
+    expr,
+    error = function(e) {
+      message(sprintf("Skipping %s: %s", med_name, e$message))
+      empty_med_table(empty_cols)
+    }
+  )
+}
 
-DTprop <- copy(propofol_expanded)
+cont_prop_receipt      <- empty_med_table(c("hospitalization_id", "cont_prop_receipt"))
+cont_precedex_receipt  <- empty_med_table(c("hospitalization_id", "cont_precedex_receipt"))
+cont_fent_receipt      <- empty_med_table(c("hospitalization_id", "cont_fent_receipt"))
+cont_hydro_receipt     <- empty_med_table(c("hospitalization_id", "cont_hydro_receipt"))
+cont_morphine_receipt  <- empty_med_table(c("hospitalization_id", "cont_morphine_receipt"))
+cont_remi_receipt      <- empty_med_table(c("hospitalization_id", "cont_remi_receipt"))
+cont_midaz_receipt     <- empty_med_table(c("hospitalization_id", "cont_midaz_receipt"))
+cont_loraz_receipt     <- empty_med_table(c("hospitalization_id", "cont_loraz_receipt"))
+cont_diaz_receipt      <- empty_med_table(c("hospitalization_id", "cont_diaz_receipt"))
+cont_ketamine_receipt  <- empty_med_table(c("hospitalization_id", "cont_ketamine_receipt"))
+cont_pentobarbital_receipt <- empty_med_table(c("hospitalization_id", "cont_pentobarbital_receipt"))
 
-DTprop[, begin_imv := as.POSIXct(begin_imv)]
-DTprop[, end_imv   := as.POSIXct(end_imv)]
-DTprop[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTprop[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTprop[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTprop[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-#########################################
-# Split infusion vs push
-# ---------------------------
-inf  <- DTprop[med_dose_unit == "mcg/kg/min"]
-setorder(inf, hospitalization_id, admin_dttm)
-push <- DTprop[med_dose_unit %in% c("mg", "mcg")]
-push[, push_dose_mg := fifelse(
-  med_dose_unit == "mcg",
-  med_dose / 1000,
-  med_dose
-)]
-
-# ---------------------------
-# PUSH: mg doses within 48h
-# ---------------------------
-push_48 <- push[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(push_dose_mg),
-  .(push_mg_48h = sum(push_dose_mg, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# convert infusion rate
-inf2[, propofol_rate_mcg_min := med_dose * weight_kg]
-
-inf2[, infusion_mg := (propofol_rate_mcg_min * duration_min) / 1000]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(propofol_rate_mcg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine push + infusion
-# ---------------------------
-propofol_total_48h <- merge(inf_48, push_48, by = "hospitalization_id", all = TRUE)
-
-propofol_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-propofol_total_48h[is.na(push_mg_48h), push_mg_48h := 0]
-
-propofol_total_48h[, propofol_total_mg_48 := infusion_mg_48h + push_mg_48h]
-propofol_total_48h <- propofol_total_48h[, .(hospitalization_id, propofol_total_mg_48)]
-
-# Convert back to hourly rate
-propofol_total_48h <- merge(
-  propofol_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final, weight_kg)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-#Calculate average infusion rate including boluses
-propofol_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-propofol_total_48h[, propofol_avg_mcgkgmin_48 := (propofol_total_mg_48 * 1000) / (weight_kg * imv_hours_capped * 60)]
-propofol_total_48h[weight_kg <= 0 | imv_hours_capped <= 0, propofol_avg_mcgkgmin_48 := NA_real_]
-propofol_total_48h <- propofol_total_48h[, .(hospitalization_id, propofol_total_mg_48, propofol_avg_mcgkgmin_48)]
 ###############################################################################
-
-#Precedex - don't need to include intermittent
-precedex <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "dexmedetomidine"]
-setorder(precedex, hospitalization_id, admin_dttm)
-
-precedex_expanded <- merge(precedex, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-precedex_expanded <- precedex_expanded[!is.na(med_dose)]
-#precedex_expanded <- precedex_expanded[!mar_action_name == "missed"]
-precedex_expanded[med_dose_unit == "mcg/kg", med_dose_unit := "mcg/kg/hr"]
-
-DTdex <- copy(precedex_expanded)  
-
-DTdex[, begin_imv := as.POSIXct(begin_imv)]
-DTdex[, end_imv   := as.POSIXct(end_imv)]
-DTdex[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTdex[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTdex[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTdex[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-
-# ---------------------------
-# Split infusion vs push
-# ---------------------------
-# Precedex infusions are usually mcg/kg/hr (sometimes mcg/kg/min exists in messy MAR data)
-inf  <- DTdex[med_dose_unit %in% c("mcg/kg/hr", "mcg/kg/min")]
-setorder(inf, hospitalization_id, admin_dttm)
-push <- DTdex[med_dose_unit == "mcg"]
-
-# ---------------------------
-# PUSH: mcg doses within 48h
-# ---------------------------
-push_48 <- push[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(push_mcg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# next timestamp + duration
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# convert rate to mcg/min depending on unit, then integrate
-inf2[, precedex_rate_mcg_min := fifelse(
-  med_dose_unit == "mcg/kg/hr",
-  (med_dose * weight_kg) / 60,         # mcg/kg/hr -> mcg/hr -> mcg/min
-  (med_dose * weight_kg)               # mcg/kg/min -> mcg/min
-)]
-
-inf2[, infusion_mcg := precedex_rate_mcg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(precedex_rate_mcg_min),
-  .(
-    infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
-
-# ---------------------------
-# Combine push + infusion
-# ---------------------------
-precedex_total_48h <- merge(inf_48, push_48, by = "hospitalization_id", all = TRUE)
-
-precedex_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
-precedex_total_48h[is.na(push_mcg_48h),    push_mcg_48h := 0]
-
-precedex_total_48h[, dexmedetomidine_total_cont_48 := infusion_mcg_48h + push_mcg_48h]
-precedex_total_48h <- precedex_total_48h[, .(hospitalization_id, dexmedetomidine_total_cont_48)]
-
-# Convert back to hourly rate
-precedex_total_48h <- merge(
-  precedex_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final, weight_kg)],
+# Propofol
+###############################################################################
+propofol_total_48h <- safe_med_eval({
+  
+  propofol_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "propofol"
+  ]
+  
+  propofol_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "propofol"
+  ]
+  
+  # If no propofol exists in either source, return empty shells
+  if (nrow(propofol_cont) == 0 && nrow(propofol_int) == 0) {
+    
+    cont_prop_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_prop_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "propofol_total_mg_48",
+      "propofol_avg_mcgkgmin_48"
+    ))
+    
+  } else {
+    
+    propofol_combined <- merge(
+      propofol_cont,
+      propofol_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    propofol_expanded <- merge(
+      propofol_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    propofol_expanded <- propofol_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(propofol_expanded) == 0) {
+      
+      cont_prop_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_prop_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "propofol_total_mg_48",
+        "propofol_avg_mcgkgmin_48"
+      ))
+      
+    } else {
+      
+      DTprop <- copy(propofol_expanded)
+      
+      DTprop[, begin_imv := as.POSIXct(begin_imv)]
+      DTprop[, end_imv := as.POSIXct(end_imv)]
+      DTprop[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTprop[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTprop[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTprop[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      #########################################
+      # Split infusion vs push
+      inf <- DTprop[med_dose_unit == "mcg/kg/min"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      push <- DTprop[med_dose_unit %in% c("mg", "mcg")]
+      push[, push_dose_mg := fifelse(
+        med_dose_unit == "mcg",
+        med_dose / 1000,
+        med_dose
+      )]
+      
+      # ---------------------------
+      # PUSH: mg doses within 48h
+      # ---------------------------
+      push_48 <- push[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(push_dose_mg),
+        .(push_mg_48h = sum(push_dose_mg, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_48 <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_48, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # convert infusion rate
+      inf2[, propofol_rate_mcg_min := med_dose * weight_kg]
+      inf2[, infusion_mg := (propofol_rate_mcg_min * duration_min) / 1000]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(propofol_rate_mcg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # zero out infusion dose if < 60 minutes total infusion time
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous propofol
+      cont_prop_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_prop_receipt[, cont_prop_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_prop_receipt) == 0) {
+        cont_prop_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_prop_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine push + infusion
+      # ---------------------------
+      propofol_total_48h <- merge(
+        inf_48,
+        push_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      propofol_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      propofol_total_48h[is.na(push_mg_48h), push_mg_48h := 0]
+      
+      propofol_total_48h[, propofol_total_mg_48 := infusion_mg_48h + push_mg_48h]
+      propofol_total_48h <- propofol_total_48h[, .(
+        hospitalization_id,
+        propofol_total_mg_48
+      )]
+      
+      # Convert back to hourly rate
+      propofol_total_48h <- merge(
+        propofol_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final,
+          weight_kg
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Calculate average infusion rate including boluses
+      propofol_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      propofol_total_48h[, propofol_avg_mcgkgmin_48 :=
+        (propofol_total_mg_48 * 1000) / (weight_kg * imv_hours_capped * 60)
+      ]
+      
+      propofol_total_48h[
+        weight_kg <= 0 | imv_hours_capped <= 0,
+        propofol_avg_mcgkgmin_48 := NA_real_
+      ]
+      
+      propofol_total_48h[, .(
+        hospitalization_id,
+        propofol_total_mg_48,
+        propofol_avg_mcgkgmin_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "propofol_total_mg_48",
+  "propofol_avg_mcgkgmin_48"
+),
+med_name = "propofol")
+################################################################################
+# Precedex
+################################################################################
+precedex_total_48h <- safe_med_eval({
+  
+  precedex <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "dexmedetomidine"
+  ]
+  
+  # If no precedex exists, return empty shells
+  if (nrow(precedex) == 0) {
+    
+    cont_precedex_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_precedex_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "dexmedetomidine_total_cont_48",
+      "dexmedetomidine_avg_mcgkghr_48"
+    ))
+    
+  } else {
+    
+    setorder(precedex, hospitalization_id, admin_dttm)
+    
+    precedex_expanded <- merge(
+      precedex,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    precedex_expanded <- precedex_expanded[!is.na(med_dose)]
+    precedex_expanded[med_dose_unit == "mcg/kg", med_dose_unit := "mcg/kg/hr"]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(precedex_expanded) == 0) {
+      
+      cont_precedex_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_precedex_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "dexmedetomidine_total_cont_48",
+        "dexmedetomidine_avg_mcgkghr_48"
+      ))
+      
+    } else {
+      
+      DTdex <- copy(precedex_expanded)
+      
+      DTdex[, begin_imv := as.POSIXct(begin_imv)]
+      DTdex[, end_imv := as.POSIXct(end_imv)]
+      DTdex[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTdex[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTdex[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTdex[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs push
+      # ---------------------------
+      inf <- DTdex[med_dose_unit %in% c("mcg/kg/hr", "mcg/kg/min")]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      push <- DTdex[med_dose_unit == "mcg"]
+      
+      # ---------------------------
+      # PUSH: mcg doses within 48h
+      # ---------------------------
+      push_48 <- push[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(push_mcg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_48 <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_48, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # next timestamp + duration
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # convert rate to mcg/min depending on unit, then integrate
+      inf2[, precedex_rate_mcg_min := fifelse(
+        med_dose_unit == "mcg/kg/hr",
+        (med_dose * weight_kg) / 60,   # mcg/kg/hr -> mcg/hr -> mcg/min
+        (med_dose * weight_kg)         # mcg/kg/min -> mcg/min
+      )]
+      
+      inf2[, infusion_mcg := precedex_rate_mcg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(precedex_rate_mcg_min),
+        .(
+          infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # zero out infusion dose if < 60 minutes total infusion time
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
+      
+      # Receipt of continuous precedex
+      cont_precedex_receipt <<- unique(
+        inf_48[infusion_mcg_48h > 0, .(hospitalization_id)]
+      )
+      cont_precedex_receipt[, cont_precedex_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_precedex_receipt) == 0) {
+        cont_precedex_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_precedex_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine push + infusion
+      # ---------------------------
+      precedex_total_48h <- merge(
+        inf_48,
+        push_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      precedex_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
+      precedex_total_48h[is.na(push_mcg_48h), push_mcg_48h := 0]
+      
+      precedex_total_48h[, dexmedetomidine_total_cont_48 := infusion_mcg_48h + push_mcg_48h]
+      precedex_total_48h <- precedex_total_48h[, .(
+        hospitalization_id,
+        dexmedetomidine_total_cont_48
+      )]
+      
+      # Convert back to average rate
+      precedex_total_48h <- merge(
+        precedex_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final,
+          weight_kg
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      precedex_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average infusion rate including pushes
+      precedex_total_48h[, dexmedetomidine_avg_mcgkghr_48 :=
+        dexmedetomidine_total_cont_48 / (weight_kg * imv_hours_capped)
+      ]
+      
+      precedex_total_48h[
+        weight_kg <= 0 | imv_hours_capped <= 0,
+        dexmedetomidine_avg_mcgkghr_48 := NA_real_
+      ]
+      
+      precedex_total_48h[, .(
+        hospitalization_id,
+        dexmedetomidine_total_cont_48,
+        dexmedetomidine_avg_mcgkghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "dexmedetomidine_total_cont_48",
+  "dexmedetomidine_avg_mcgkghr_48"
+),
+med_name = "dexmedetomidine")
+###############################################################################
+# FENTANYL
+###############################################################################
+fentanyl_total_48h <- safe_med_eval({
+  
+  fentanyl_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "fentanyl"
+  ]
+  
+  fentanyl_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "fentanyl"
+  ]
+  
+  # If no fentanyl exists in either source, return empty shells
+  if (nrow(fentanyl_cont) == 0 && nrow(fentanyl_int) == 0) {
+    
+    cont_fent_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_fent_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "fentanyl_total_mcg_48",
+      "fentanyl_total_mme_48",
+      "fentanyl_avg_mcghr_48"
+    ))
+    
+  } else {
+    
+    fentanyl_combined <- merge(
+      fentanyl_cont,
+      fentanyl_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    fentanyl_expanded <- merge(
+  fentanyl_combined,
+  final_cohort_imv_runs,
   by = "hospitalization_id",
-  all.x = TRUE
+  all = TRUE
 )
 
-# Calculate average infusion rate including boluses
-precedex_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
+  fentanyl_expanded <- fentanyl_expanded[!is.na(med_dose)]
+  fentanyl_expanded <- fentanyl_expanded[med_dose_unit != "mcg/min"]
 
-precedex_total_48h[, dexmedetomidine_avg_mcgkghr_48 := dexmedetomidine_total_cont_48 / (weight_kg * imv_hours_capped)]
-precedex_total_48h[weight_kg <= 0 | imv_hours_capped <= 0, dexmedetomidine_avg_mcgkghr_48 := NA_real_]
+  # Convert weight-based fentanyl infusion rates to mcg/hr
+  fentanyl_expanded[
+  med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+  `:=`(
+    med_dose = med_dose * weight_kg,
+    med_dose_unit = "mcg/hr"
+    )
+  ]
 
-precedex_total_48h <- precedex_total_48h[, .(hospitalization_id, dexmedetomidine_total_cont_48,
-                                             dexmedetomidine_avg_mcgkghr_48)]
-
-####################################################
-# Fentanyl
-fentanyl_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "fentanyl"]
-#setorder(fentanyl, hospitalization_id, admin_dttm)
-fentanyl_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "fentanyl"]
-
-fentanyl_combined <- merge(fentanyl_cont, fentanyl_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-
-fentanyl_expanded <- merge(fentanyl_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-fentanyl_expanded <- fentanyl_expanded[!is.na(med_dose)]
-#fentanyl_expanded <- fentanyl_expanded[!mar_action_name == "missed"]
-#fentanyl_expanded <- fentanyl_expanded[
-#  !(med_dose_unit == "mcg" & mar_action_name != "bolus")
-#]
-fentanyl_expanded <- fentanyl_expanded[!med_dose_unit == "mcg/min"]
-fentanyl_expanded[med_dose_unit == "mcg/kg/hr", med_dose_unit := "mcg/kg"]
-
-DTfent <- copy(fentanyl_expanded)   # <- your table name
-
-DTfent[, begin_imv  := as.POSIXct(begin_imv)]
-DTfent[, end_imv    := as.POSIXct(end_imv)]
-DTfent[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTfent[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-
-DTfent[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-DTfent[, window_end := fifelse(!is.na(end_imv) & end_imv < end_48h, end_imv, end_48h)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf   <- DTfent[med_dose_unit == "mcg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTfent[med_dose_unit == "mcg"]
-
-# ---------------------------
-# BOLUS: mcg doses within window
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mcg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_win <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_win, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# intervals
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate: mcg/hr -> mcg/min -> mcg
-inf2[, fent_rate_mcg_min := med_dose / 60]
-inf2[, infusion_mcg := fent_rate_mcg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(fent_rate_mcg_min),
-  .(
-    infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# only count infusion if >= 60 minutes
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-fentanyl_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-fentanyl_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
-fentanyl_total_48h[is.na(bolus_mcg_48h),   bolus_mcg_48h := 0]
-fentanyl_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]  # optional
-
-fentanyl_total_48h[, fentanyl_total_mcg_48 := infusion_mcg_48h + bolus_mcg_48h]
-
-fentanyl_total_48h <- fentanyl_total_48h[, .(hospitalization_id, fentanyl_total_mcg_48)]
-
-fentanyl_total_48h[, fentanyl_total_mme_48 := fentanyl_total_mcg_48 * 0.1]
-
-
-# Merge in duration
-fentanyl_total_48h <- merge(
-  fentanyl_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-fentanyl_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mcg/hr
-fentanyl_total_48h[, fentanyl_avg_mcghr_48 := fentanyl_total_mcg_48 / imv_hours_capped]
-fentanyl_total_48h[imv_hours_capped <= 0, fentanyl_avg_mcghr_48 := NA_real_]
-
-fentanyl_total_48h <- fentanyl_total_48h[, .(hospitalization_id, fentanyl_total_mcg_48,
-                                                       fentanyl_total_mme_48, fentanyl_avg_mcghr_48)]
-
-#Receipt of Infusion
-cont_fent_receipt <- unique(inf_48[infusion_mcg_48h > 0, .(hospitalization_id)])
-cont_fent_receipt[, cont_fent_receipt := 1]
-
+# Drop rows that still cannot be interpreted safely
+  fentanyl_expanded <- fentanyl_expanded[
+    !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+    ]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(fentanyl_expanded) == 0) {
+      
+      cont_fent_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_fent_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "fentanyl_total_mcg_48",
+        "fentanyl_total_mme_48",
+        "fentanyl_avg_mcghr_48"
+      ))
+      
+    } else {
+      
+      DTfent <- copy(fentanyl_expanded)
+      
+      DTfent[, begin_imv := as.POSIXct(begin_imv)]
+      DTfent[, end_imv := as.POSIXct(end_imv)]
+      DTfent[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTfent[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTfent[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTfent[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTfent[med_dose_unit == "mcg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTfent[med_dose_unit == "mcg"]
+      
+      # ---------------------------
+      # BOLUS: mcg doses within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mcg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # intervals
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mcg/hr -> mcg/min -> mcg
+      inf2[, fent_rate_mcg_min := med_dose / 60]
+      inf2[, infusion_mcg := fent_rate_mcg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(fent_rate_mcg_min),
+        .(
+          infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # only count infusion if >= 60 minutes
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
+      
+      # Receipt of continuous fentanyl
+      cont_fent_receipt <<- unique(
+        inf_48[infusion_mcg_48h > 0, .(hospitalization_id)]
+      )
+      cont_fent_receipt[, cont_fent_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_fent_receipt) == 0) {
+        cont_fent_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_fent_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      fentanyl_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      fentanyl_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
+      fentanyl_total_48h[is.na(bolus_mcg_48h), bolus_mcg_48h := 0]
+      fentanyl_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      fentanyl_total_48h[, fentanyl_total_mcg_48 := infusion_mcg_48h + bolus_mcg_48h]
+      fentanyl_total_48h <- fentanyl_total_48h[, .(
+        hospitalization_id,
+        fentanyl_total_mcg_48
+      )]
+      
+      fentanyl_total_48h[, fentanyl_total_mme_48 := fentanyl_total_mcg_48 * 0.1]
+      
+      # Merge in duration
+      fentanyl_total_48h <- merge(
+        fentanyl_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      fentanyl_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mcg/hr
+      fentanyl_total_48h[, fentanyl_avg_mcghr_48 := fentanyl_total_mcg_48 / imv_hours_capped]
+      fentanyl_total_48h[imv_hours_capped <= 0, fentanyl_avg_mcghr_48 := NA_real_]
+      
+      fentanyl_total_48h[, .(
+        hospitalization_id,
+        fentanyl_total_mcg_48,
+        fentanyl_total_mme_48,
+        fentanyl_avg_mcghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "fentanyl_total_mcg_48",
+  "fentanyl_total_mme_48",
+  "fentanyl_avg_mcghr_48"
+),
+med_name = "fentanyl")
 ###############################################################################
 # Hydromorphone
-hydromorphone_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "hydromorphone"]
-#setorder(hydromorphone, hospitalization_id, admin_dttm)
-hydromorphone_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "hydromorphone"]
-
-hydromorphone_combined <- merge(hydromorphone_cont, hydromorphone_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-
-hydromorphone_expanded <- merge(hydromorphone_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-hydromorphone_expanded <- hydromorphone_expanded[!is.na(med_dose)]
-
-DThydro <- copy(hydromorphone_expanded)
-
-DThydro[, begin_imv  := as.POSIXct(begin_imv)]
-DThydro[, end_imv    := as.POSIXct(end_imv)]
-DThydro[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DThydro[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DThydro[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-DThydro[, window_end := fifelse(!is.na(end_imv) & end_imv < end_48h, end_imv, end_48h)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf   <- DThydro[med_dose_unit == "mg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DThydro[med_dose_unit == "mg"]
-
-# ---------------------------
-# BOLUS mg within window
-# ---------------------------
-# Convert any oral doses to IV equivalent for MME calculations later
-bolus[, hydromorphone_iv_equiv_mg := fcase(
-  med_route_category == "iv",      med_dose,
-  med_route_category == "enteral", med_dose / 5,
-  default = med_dose
-)]
-
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(hydromorphone_iv_equiv_mg),
-  .(bolus_mg_48h = sum(hydromorphone_iv_equiv_mg, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline
-# ---------------------------
-
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_win <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_win, baseline_rows), use.names = TRUE, fill = TRUE)
-
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# interval durations
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate infusion mg/hr -> mg/min -> mg
-inf2[, hydromorphone_rate_mg_min := med_dose / 60]
-inf2[, infusion_mg := hydromorphone_rate_mg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(hydromorphone_rate_mg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# require >=60 minutes infusion
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-hydromorphone_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-hydromorphone_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-hydromorphone_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
-
-hydromorphone_total_48h[, hydromorphone_total_48 := infusion_mg_48h + bolus_mg_48h]
-
-hydromorphone_total_48h <- hydromorphone_total_48h[, .(hospitalization_id, hydromorphone_total_48)]
-
-#Add MME for hydromorphone
-hydromorphone_total_48h[, hydromorphone_total_mme_48 := hydromorphone_total_48 * 20]
-
-# Merge in duration
-hydromorphone_total_48h <- merge(
-  hydromorphone_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-hydromorphone_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mg/hr
-hydromorphone_total_48h[, hydromorphone_avg_mghr_48 := hydromorphone_total_48 / imv_hours_capped]
-hydromorphone_total_48h[imv_hours_capped <= 0, hydromorphone_avg_mghr_48 := NA_real_]
-
-hydromorphone_total_48h <- hydromorphone_total_48h[, .(hospitalization_id, hydromorphone_total_48,
-                                                       hydromorphone_total_mme_48, hydromorphone_avg_mghr_48)]
-
-#Receipt of Infusion
-cont_hydro_receipt <- unique(inf_48[infusion_mg_48h > 0, .(hospitalization_id)])
-cont_hydro_receipt[, cont_hydro_receipt := 1]
-
+###############################################################################
+hydromorphone_total_48h <- safe_med_eval({
+  
+  hydromorphone_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "hydromorphone"
+  ]
+  
+  hydromorphone_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "hydromorphone"
+  ]
+  
+  # If no hydromorphone exists in either source, return empty shells
+  if (nrow(hydromorphone_cont) == 0 && nrow(hydromorphone_int) == 0) {
+    
+    cont_hydro_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_hydro_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "hydromorphone_total_48",
+      "hydromorphone_total_mme_48",
+      "hydromorphone_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    hydromorphone_combined <- merge(
+      hydromorphone_cont,
+      hydromorphone_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    hydromorphone_expanded <- merge(
+      hydromorphone_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    hydromorphone_expanded <- hydromorphone_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(hydromorphone_expanded) == 0) {
+      
+      cont_hydro_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_hydro_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "hydromorphone_total_48",
+        "hydromorphone_total_mme_48",
+        "hydromorphone_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DThydro <- copy(hydromorphone_expanded)
+      
+      DThydro[, begin_imv := as.POSIXct(begin_imv)]
+      DThydro[, end_imv := as.POSIXct(end_imv)]
+      DThydro[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DThydro[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      DThydro[, med_route_category := trimws(tolower(med_route_category))]
+      
+      DThydro[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DThydro[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DThydro[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DThydro[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS mg within window
+      # ---------------------------
+      # Convert any oral doses to IV equivalent for MME calculations later
+      bolus[, hydromorphone_iv_equiv_mg := fcase(
+        med_route_category == "iv", med_dose,
+        med_route_category == "enteral", med_dose / 5,
+        default = med_dose
+      )]
+      
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(hydromorphone_iv_equiv_mg),
+        .(bolus_mg_48h = sum(hydromorphone_iv_equiv_mg, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # interval durations
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate infusion mg/hr -> mg/min -> mg
+      inf2[, hydromorphone_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := hydromorphone_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(hydromorphone_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # require >=60 minutes infusion
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous hydromorphone
+      cont_hydro_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_hydro_receipt[, cont_hydro_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_hydro_receipt) == 0) {
+        cont_hydro_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_hydro_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      hydromorphone_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      hydromorphone_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      hydromorphone_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      
+      hydromorphone_total_48h[, hydromorphone_total_48 := infusion_mg_48h + bolus_mg_48h]
+      hydromorphone_total_48h <- hydromorphone_total_48h[, .(
+        hospitalization_id,
+        hydromorphone_total_48
+      )]
+      
+      # Add MME for hydromorphone
+      hydromorphone_total_48h[, hydromorphone_total_mme_48 := hydromorphone_total_48 * 20]
+      
+      # Merge in duration
+      hydromorphone_total_48h <- merge(
+        hydromorphone_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      hydromorphone_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      hydromorphone_total_48h[, hydromorphone_avg_mghr_48 := hydromorphone_total_48 / imv_hours_capped]
+      hydromorphone_total_48h[imv_hours_capped <= 0, hydromorphone_avg_mghr_48 := NA_real_]
+      
+      hydromorphone_total_48h[, .(
+        hospitalization_id,
+        hydromorphone_total_48,
+        hydromorphone_total_mme_48,
+        hydromorphone_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "hydromorphone_total_48",
+  "hydromorphone_total_mme_48",
+  "hydromorphone_avg_mghr_48"
+),
+med_name = "hydromorphone")
 ################################################################################
 # Morphine
-morphine_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "morphine"]
-morphine_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "morphine"]
-morphine_combined <- merge(morphine_cont, morphine_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-setorder(morphine_combined, hospitalization_id, admin_dttm)
-
-morphine_expanded <- merge(morphine_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-
-morphine_expanded <- morphine_expanded[!is.na(med_dose)]
-
-DTmorphine <- copy(morphine_expanded)
-
-DTmorphine[, begin_imv  := as.POSIXct(begin_imv)]
-DTmorphine[, end_imv    := as.POSIXct(end_imv)]
-DTmorphine[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTmorphine[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTmorphine[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-DTmorphine[, window_end := fifelse(!is.na(end_imv) & end_imv < end_48h, end_imv, end_48h)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf   <- DTmorphine[med_dose_unit == "mg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTmorphine[med_dose_unit == "mg"]
-
-# ---------------------------
-# BOLUS: mg within window
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_win <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_win, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at the same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# intervals
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate: mg/hr -> mg/min -> mg
-inf2[, morphine_rate_mg_min := med_dose / 60]
-inf2[, infusion_mg := morphine_rate_mg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(morphine_rate_mg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# require >=60 minutes infusion
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-morphine_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-morphine_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-morphine_total_48h[is.na(bolus_mg_48h),   bolus_mg_48h := 0]
-morphine_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]  # optional
-
-morphine_total_48h[, morphine_total_48 := infusion_mg_48h + bolus_mg_48h]
-morphine_total_48h <- morphine_total_48h[, .(hospitalization_id, morphine_total_48)]
-
-morphine_total_48h[, morphine_total_mme_48 := morphine_total_48]
-
-# Merge in duration
-morphine_total_48h <- merge(
-  morphine_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-morphine_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mg/hr
-morphine_total_48h[, morphine_avg_mghr_48 := morphine_total_48 / imv_hours_capped]
-morphine_total_48h[imv_hours_capped <= 0, morphine_avg_mghr_48 := NA_real_]
-
-morphine_total_48h <- morphine_total_48h[, .(hospitalization_id, morphine_total_48,
-                                             morphine_total_mme_48,
-                                             morphine_avg_mghr_48)]
-
-#Receipt of Infusion
-cont_morphine_receipt <- unique(inf_48[infusion_mg_48h > 0, .(hospitalization_id)])
-cont_morphine_receipt[, cont_morphine_receipt := 1]
-
 ###############################################################################
-
+morphine_total_48h <- safe_med_eval({
+  
+  morphine_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "morphine"
+  ]
+  
+  morphine_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "morphine"
+  ]
+  
+  # If no morphine exists in either source, return empty shells
+  if (nrow(morphine_cont) == 0 && nrow(morphine_int) == 0) {
+    
+    cont_morphine_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_morphine_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "morphine_total_48",
+      "morphine_total_mme_48",
+      "morphine_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    morphine_combined <- merge(
+      morphine_cont,
+      morphine_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(morphine_combined, hospitalization_id, admin_dttm)
+    
+    morphine_expanded <- merge(
+      morphine_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    morphine_expanded <- morphine_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(morphine_expanded) == 0) {
+      
+      cont_morphine_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_morphine_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "morphine_total_48",
+        "morphine_total_mme_48",
+        "morphine_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTmorphine <- copy(morphine_expanded)
+      
+      DTmorphine[, begin_imv := as.POSIXct(begin_imv)]
+      DTmorphine[, end_imv := as.POSIXct(end_imv)]
+      DTmorphine[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTmorphine[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTmorphine[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTmorphine[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTmorphine[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTmorphine[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at the same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # intervals
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, morphine_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := morphine_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(morphine_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # require >=60 minutes infusion
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous morphine
+      cont_morphine_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_morphine_receipt[, cont_morphine_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_morphine_receipt) == 0) {
+        cont_morphine_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_morphine_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      morphine_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      morphine_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      morphine_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      morphine_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      morphine_total_48h[, morphine_total_48 := infusion_mg_48h + bolus_mg_48h]
+      morphine_total_48h <- morphine_total_48h[, .(
+        hospitalization_id,
+        morphine_total_48
+      )]
+      
+      morphine_total_48h[, morphine_total_mme_48 := morphine_total_48]
+      
+      # Merge in duration
+      morphine_total_48h <- merge(
+        morphine_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      morphine_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      morphine_total_48h[, morphine_avg_mghr_48 := morphine_total_48 / imv_hours_capped]
+      morphine_total_48h[imv_hours_capped <= 0, morphine_avg_mghr_48 := NA_real_]
+      
+      morphine_total_48h[, .(
+        hospitalization_id,
+        morphine_total_48,
+        morphine_total_mme_48,
+        morphine_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "morphine_total_48",
+  "morphine_total_mme_48",
+  "morphine_avg_mghr_48"
+),
+med_name = "morphine")
+################################################################################
 # Remifentanil
-remifentanil <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "remifentanil"]
-setorder(remifentanil, hospitalization_id, admin_dttm)
-
-remifentanil_expanded <- merge(remifentanil, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-remifentanil_expanded <- remifentanil_expanded[!is.na(med_dose)]
-#remifentanil_expanded <- remifentanil_expanded[!mar_action_name == "missed"]
-#remifentanil_expanded <- remifentanil_expanded[
-#  !(med_dose_unit == "mcg" & mar_action_name != "bolus")
-#]
-
-DTremi <- copy(remifentanil_expanded)  
-
-DTremi[, begin_imv  := as.POSIXct(begin_imv)]
-DTremi[, end_imv    := as.POSIXct(end_imv)]
-DTremi[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTremi[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTremi[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-DTremi[, window_end := fifelse(!is.na(end_imv) & end_imv < end_48h, end_imv, end_48h)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf   <- DTremi[med_dose_unit %in% c("mcg/kg/min", "mcg/kg/hr")]  # include hr just in case
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTremi[med_dose_unit == "mcg"]  # if present
-
-# ---------------------------
-# BOLUS: mcg doses within window
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mcg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_win <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_win, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# intervals
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# convert to mcg/min, then integrate to mcg
-inf2[, remi_rate_mcg_min := fifelse(
-  med_dose_unit == "mcg/kg/hr",
-  (med_dose * weight_kg) / 60,     # mcg/kg/hr -> mcg/hr -> mcg/min
-  (med_dose * weight_kg)           # mcg/kg/min -> mcg/min
-)]
-
-inf2[, infusion_mcg := remi_rate_mcg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(remi_rate_mcg_min),
-  .(
-    infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# only count infusion if >= 60 minutes
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-remifentanil_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-remifentanil_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
-remifentanil_total_48h[is.na(bolus_mcg_48h),   bolus_mcg_48h := 0]
-remifentanil_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]  # optional
-
-remifentanil_total_48h[, remifentanil_total_48 := infusion_mcg_48h + bolus_mcg_48h]
-remifentanil_total_48h <- remifentanil_total_48h[, .(hospitalization_id, remifentanil_total_48)]
-
-
-# Merge in duration
-remifentanil_total_48h <- merge(
-  remifentanil_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Calculate average infusion rate including boluses
-# Cap IMV duration at 48h
-remifentanil_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average rate including boluses
-remifentanil_total_48h[, remifentanil_avg_mcgkgmin_48 := remifentanil_total_48 / (imv_hours_capped * 60)]
-remifentanil_total_48h[imv_hours_capped <= 0, remifentanil_avg_mcgkgmin_48 := NA_real_]
-
-remifentanil_total_48h <- remifentanil_total_48h[, .(hospitalization_id, remifentanil_total_48,
-                                                     remifentanil_avg_mcgkgmin_48)]
-remifentanil_total_48h[, remifentanil_total_mme_48 := remifentanil_total_48 * 0.1]
-
-#Receipt of Infusion
-cont_remi_receipt <- unique(inf_48[infusion_mcg_48h > 0, .(hospitalization_id)])
-cont_remi_receipt[, cont_remi_receipt := 1]
-################################################################################
-
-#Midazolam
-midazolam_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "midazolam"]
-midazolam_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "midazolam"]
-midazolam_combined <- merge(midazolam_cont, midazolam_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-setorder(midazolam_combined, hospitalization_id, admin_dttm)
-
-midazolam_expanded <- merge(midazolam_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-midazolam_expanded <- midazolam_expanded[!is.na(med_dose)]
-
-DTmidaz <- copy(midazolam_expanded)
-
-DTmidaz[, begin_imv := as.POSIXct(begin_imv)]
-DTmidaz[, end_imv   := as.POSIXct(end_imv)]
-DTmidaz[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTmidaz[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTmidaz[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTmidaz[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf  <- DTmidaz[med_dose_unit == "mg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTmidaz[med_dose_unit == "mg"]   # bolus rows
-
-# ---------------------------
-# BOLUS: mg doses within 48h
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# durations
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate: mg/hr -> mg/min -> mg
-inf2[, midaz_rate_mg_min := med_dose / 60]
-inf2[, infusion_mg := midaz_rate_mg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(midaz_rate_mg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-midazolam_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-midazolam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-midazolam_total_48h[is.na(bolus_mg_48h),   bolus_mg_48h := 0]
-
-midazolam_total_48h[, midaz_total_48 := infusion_mg_48h + bolus_mg_48h]
-midazolam_total_48h <- midazolam_total_48h[, .(hospitalization_id, midaz_total_48)]
-
-
-# Merge in duration
-midazolam_total_48h <- merge(
-  midazolam_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-midazolam_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mg/hr
-midazolam_total_48h[, midazolam_avg_mghr_48 := midaz_total_48 / imv_hours_capped]
-midazolam_total_48h[imv_hours_capped <= 0, midazolam_avg_mghr_48 := NA_real_]
-
-midazolam_total_48h <- midazolam_total_48h[, .(hospitalization_id, midaz_total_48,
-                                             midazolam_avg_mghr_48)]
-
-#Receipt of Infusion
-cont_midaz_receipt <- unique(inf_48[infusion_mg_48h > 0, .(hospitalization_id)])
-cont_midaz_receipt[, cont_midaz_receipt := 1]
-################################################################################
-
-# Lorazepam
-
-lorazepam_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "lorazepam"]
-lorazepam_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "lorazepam"]
-lorazepam_combined <- merge(lorazepam_cont, lorazepam_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-setorder(lorazepam_combined, hospitalization_id, admin_dttm)
-
-lorazepam_expanded <- merge(lorazepam_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-lorazepam_expanded <- lorazepam_expanded[!is.na(med_dose)]
-#lorazepam_expanded <- lorazepam_expanded[!mar_action_name == "missed"]
-#lorazepam_expanded <- lorazepam_expanded[
-#  !(med_dose_unit == "mg" & mar_action_name != "bolus")
-#]
-
-DTloraz <- copy(lorazepam_expanded)  # <- your table name
-
-DTloraz[, begin_imv := as.POSIXct(begin_imv)]
-DTloraz[, end_imv   := as.POSIXct(end_imv)]
-DTloraz[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTloraz[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTloraz[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTloraz[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf  <- DTloraz[med_dose_unit == "mg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTloraz[med_dose_unit == "mg"]   # bolus rows
-
-# ---------------------------
-# BOLUS: mg doses within 48h
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# durations
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate: mg/hr -> mg/min -> mg
-inf2[, loraz_rate_mg_min := med_dose / 60]
-inf2[, infusion_mg := loraz_rate_mg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(loraz_rate_mg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-lorazepam_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-lorazepam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-lorazepam_total_48h[is.na(bolus_mg_48h),   bolus_mg_48h := 0]
-
-lorazepam_total_48h[, loraz_total_48 := infusion_mg_48h + bolus_mg_48h]
-lorazepam_total_48h <- lorazepam_total_48h[, .(hospitalization_id, loraz_total_48)]
-
-# Merge in duration
-lorazepam_total_48h <- merge(
-  lorazepam_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-lorazepam_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mg/hr
-lorazepam_total_48h[, lorazepam_avg_mghr_48 := loraz_total_48 / imv_hours_capped]
-lorazepam_total_48h[imv_hours_capped <= 0, lorazepam_avg_mghr_48 := NA_real_]
-
-lorazepam_total_48h <- lorazepam_total_48h[, .(hospitalization_id, loraz_total_48,
-                                             lorazepam_avg_mghr_48)]
-
-#Receipt of Infusion
-cont_loraz_receipt <- unique(inf_48[infusion_mg_48h > 0, .(hospitalization_id)])
-cont_loraz_receipt[, cont_loraz_receipt := 1]
-
-################################################################################
-
-# Diazepam
-diazepam_cont <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "diazepam"]
-diazepam_int <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_category == "diazepam"]
-diazepam_combined <- merge(diazepam_cont, diazepam_int, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category"), all = TRUE)
-setorder(diazepam_combined, hospitalization_id, admin_dttm)
-
-diazepam_expanded <- merge(diazepam_combined, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-diazepam_expanded <- diazepam_expanded[!is.na(med_dose)]
-
-DTdiaz <- copy(diazepam_expanded)
-
-DTdiaz[, begin_imv := as.POSIXct(begin_imv)]
-DTdiaz[, end_imv   := as.POSIXct(end_imv)]
-DTdiaz[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTdiaz[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTdiaz[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTdiaz[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-
-# ---------------------------
-# Split infusion vs bolus
-# ---------------------------
-inf  <- DTdiaz[med_dose_unit == "mg/hr"]
-setorder(inf, hospitalization_id, admin_dttm)
-bolus <- DTdiaz[med_dose_unit == "mg"]   # bolus rows
-
-# ---------------------------
-# BOLUS: mg doses within 48h
-# ---------------------------
-bolus_48 <- bolus[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline (with 1h grace baseline)
-# ---------------------------
-
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-# if multiple rows at same timestamp, keep the last one
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
-
-# durations
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# integrate: mg/hr -> mg/min -> mg
-inf2[, loraz_rate_mg_min := med_dose / 60]
-inf2[, infusion_mg := loraz_rate_mg_min * duration_min]
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(loraz_rate_mg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine infusion + bolus
-# ---------------------------
-diazepam_total_48h <- merge(inf_48, bolus_48, by = "hospitalization_id", all = TRUE)
-
-diazepam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-diazepam_total_48h[is.na(bolus_mg_48h),   bolus_mg_48h := 0]
-
-diazepam_total_48h[, diaz_total_48 := infusion_mg_48h + bolus_mg_48h]
-diazepam_total_48h <- diaz_total_48h[, .(hospitalization_id, diaz_total_48)]
-
-# Merge in duration
-diazepam_total_48h <- merge(
-  diazepam_total_48h,
-  final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
-  by = "hospitalization_id",
-  all.x = TRUE
-)
-
-# Cap at 48h
-diazepam_total_48h[, imv_hours_capped := fcase(
-  is.na(imv_duration_hours_final), NA_real_,
-  imv_duration_hours_final > 48, 48,
-  default = imv_duration_hours_final
-)]
-
-# Average mg/hr
-diazepam_total_48h[, diazepam_avg_mghr_48 := diaz_total_48 / imv_hours_capped]
-diazepam_total_48h[imv_hours_capped <= 0, diazepam_avg_mghr_48 := NA_real_]
-
-diazepam_total_48h <- diazepam_total_48h[, .(hospitalization_id, diaz_total_48,
-                                             diazepam_avg_mghr_48)]
-
-#Receipt of Infusion
-cont_diaz_receipt <- unique(inf_48[infusion_mg_48h > 0, .(hospitalization_id)])
-cont_diaz_receipt[, cont_diaz_receipt := 1]
-
-################################################################################
-
-# Continuous Paralytics
-paralytics <- meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & med_group == "paralytics"]
-setorder(paralytics, hospitalization_id, admin_dttm)
-
-paralytics_expanded <- merge(paralytics, final_cohort_imv_runs, by = "hospitalization_id", all = TRUE)
-paralytics_expanded <- paralytics_expanded[!is.na(med_dose)]
-
-DTparalytics <- copy(paralytics_expanded)
-
-DTparalytics[, begin_imv := as.POSIXct(begin_imv)]
-DTparalytics[, end_imv   := as.POSIXct(end_imv)]
-DTparalytics[, admin_dttm := as.POSIXct(admin_dttm)]
-
-# normalize med_dose_unit for robustness
-DTparalytics[, med_dose_unit := trimws(tolower(med_dose_unit))]
-
-DTparalytics[, `:=`(
-  start_grace = begin_imv - 60*60,
-  end_48h     = begin_imv + 48*60*60
-)]
-
-# If end_imv is earlier than begin_imv+48h, cap window there; otherwise use begin_imv+48h
-DTparalytics[, window_end := fifelse(
-  !is.na(end_imv) & end_imv < end_48h,
-  end_imv,
-  end_48h
-)]
-
-# ---------------------------
-# Split infusion vs push
-# ---------------------------
-inf  <- DTparalytics[med_dose_unit == "mcg/kg/min"]
-setorder(inf, hospitalization_id, admin_dttm)
-push <- DTparalytics[med_dose_unit == "mcg"]
-
-# ---------------------------
-# PUSH: mg doses within 48h
-# ---------------------------
-push_48 <- push[
-  admin_dttm >= begin_imv & admin_dttm <= window_end & !is.na(med_dose),
-  .(push_mg_48h = sum(med_dose, na.rm = TRUE)),
-  by = hospitalization_id
-]
-
-# ---------------------------
-# INFUSION timeline
-# ---------------------------
-baseline_rows <- inf[
-  admin_dttm >= start_grace & admin_dttm < begin_imv,
-  .SD[.N],
-  by = hospitalization_id
-][
-  , admin_dttm := begin_imv
-]
-
-inf_0_48 <- inf[
-  admin_dttm >= begin_imv & admin_dttm <= window_end
-]
-
-inf2 <- rbindlist(list(inf_0_48, baseline_rows), use.names = TRUE, fill = TRUE)
-
-setorder(inf2, hospitalization_id, admin_dttm)
-inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
-
-inf2[, interval_end := fifelse(is.na(next_admin_dttm), window_end, pmin(next_admin_dttm, window_end))]
-inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
-
-# convert infusion rate
-inf2[, paralytics_rate_mcg_min := med_dose * weight_kg]
-
-inf2[, infusion_mg := (paralytics_rate_mcg_min * duration_min) / 1000]
-
-
-# Keep only valid infusion intervals
-inf2_valid <- inf2[
-  duration_min > 0 & !is.na(paralytics_rate_mcg_min)
-]
-
-# Summarize start time and infusion duration in first 48h
-paralytics_inf_summary <- inf2_valid[
-  ,
-  .(
-    continuous_nmba_start_48 = min(admin_dttm, na.rm = TRUE),
-    continuous_nmba_minutes_48 = sum(duration_min, na.rm = TRUE),
-    continuous_nmba_hours_48 = sum(duration_min, na.rm = TRUE) / 60
-  ),
-  by = hospitalization_id
-]
-
-# Apply your 60-minute rule
-paralytics_inf_summary[continuous_nmba_minutes_48 < 60, `:=`(
-  continuous_nmba_start_48 = as.POSIXct(NA),
-  continuous_nmba_hours_48 = 0
-)]
-
-
-inf_48 <- inf2[
-  duration_min > 0 & !is.na(paralytics_rate_mcg_min),
-  .(
-    infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
-    infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
-  ),
-  by = hospitalization_id
-]
-
-# zero out infusion dose if < 60 minutes total infusion time
-inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
-inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
-
-# ---------------------------
-# Combine push + infusion
-# ---------------------------
-paralytics_cont_48h <- inf_48
-
-paralytics_cont_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
-
-paralytics_cont_48h[, paralytics_total_cont_48 := infusion_mg_48h]
-paralytics_cont_48h <- paralytics_cont_48h[, .(
-  hospitalization_id,
-  paralytics_total_cont_48
-)]
-
-# Merge in timing summary
-paralytics_cont_48h <- merge(
-  paralytics_cont_48h,
-  paralytics_inf_summary[, .(
-    hospitalization_id,
-    continuous_nmba_start_48,
-    continuous_nmba_hours_48
-  )],
-  by = "hospitalization_id",
-  all = TRUE
-)
-
-# Merge onto final cohort
-paralytics_final <- merge(
-  final_cohort_imv_runs,
-  paralytics_cont_48h,
-  by = "hospitalization_id",
-  all = TRUE
-)
-
-# Fill in missing values
-paralytics_final[is.na(paralytics_total_cont_48), paralytics_total_cont_48 := 0]
-paralytics_final[is.na(continuous_nmba_hours_48), continuous_nmba_hours_48 := 0]
-
-# Binary indicator
-paralytics_final[, continuous_nmba_48 :=
-  as.integer(paralytics_total_cont_48 > 0)
-]
-
-# Keep final columns
-paralytics_final <- paralytics_final[, .(hospitalization_id, continuous_nmba_48,
-                                         continuous_nmba_start_48,
-                                         continuous_nmba_hours_48,
-                                         paralytics_total_cont_48)]
-
-################################################################################
-
-#Push Paralytics??
-paralytic_pushes <- intermittent_meds[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-setorder(paralytic_pushes, hospitalization_id, admin_dttm)
-reduced_hosp_info <- final_cohort_imv_runs[, .(hospitalization_id, begin_imv, end_imv)]
-paralytics_hosp_merge <- merge(paralytic_pushes, reduced_hosp_info, by = "hospitalization_id", all = TRUE)
-paralytics_hosp_merge <- paralytics_hosp_merge[!is.na(med_dose) & med_dose > 0]
-paralytic_pushes_first_48h <- paralytics_hosp_merge[
-  admin_dttm >= begin_imv + lubridate::hours(4) & admin_dttm <= begin_imv + lubridate::hours(48)
-]
-paralytic_pushes_first_48h[, push_paralytics := 1]
-paralytic_pushes_first_48h_final <- paralytic_pushes_first_48h[, .(hospitalization_id, push_paralytics)]
-paralytic_pushes_first_48h_final <- unique(paralytic_pushes_first_48h_final, by = c("hospitalization_id"))
-
-
-
 ###############################################################################
-# Combine All Med Tables
-# List of tables to merge
-tables_merge_meds <- list(propofol_total_48h,
-                          precedex_total_48h,
-                          fentanyl_total_48h,
-                          cont_fent_receipt,
-                          hydromorphone_total_48h,
-                          cont_hydro_receipt,
-                          morphine_total_48h,
-                          cont_morphine_receipt,
-                          remifentanil_total_48h,
-                          cont_remi_receipt,
-                          midazolam_total_48h,
-                          cont_midaz_receipt,
-                          lorazepam_total_48h,
-                          cont_loraz_receipt,
-                          diazepam_total_48h,
-                          cont_diaz_receipt,
-                          paralytics_final,
-                          paralytic_pushes_first_48h_final)
+remifentanil_total_48h <- safe_med_eval({
+  
+  remifentanil <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "remifentanil"
+  ]
+  
+  # If no remifentanil exists, return empty shells
+  if (nrow(remifentanil) == 0) {
+    
+    cont_remi_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_remi_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "remifentanil_total_48",
+      "remifentanil_total_mme_48",
+      "remifentanil_avg_mcgkgmin_48"
+    ))
+    
+  } else {
+    
+    setorder(remifentanil, hospitalization_id, admin_dttm)
+    
+    remifentanil_expanded <- merge(
+      remifentanil,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    remifentanil_expanded <- remifentanil_expanded[!is.na(med_dose)]
+    
+    # normalize odd weight-based hourly entries to mcg/kg/min
+    remifentanil_expanded[
+      med_dose_unit == "mcg/kg/hr" & !is.na(med_dose),
+      `:=`(
+        med_dose = med_dose / 60,
+        med_dose_unit = "mcg/kg/min"
+      )
+    ]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(remifentanil_expanded) == 0) {
+      
+      cont_remi_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_remi_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "remifentanil_total_48",
+        "remifentanil_total_mme_48",
+        "remifentanil_avg_mcgkgmin_48"
+      ))
+      
+    } else {
+      
+      DTremi <- copy(remifentanil_expanded)
+      
+      DTremi[, begin_imv := as.POSIXct(begin_imv)]
+      DTremi[, end_imv := as.POSIXct(end_imv)]
+      DTremi[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTremi[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTremi[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTremi[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTremi[med_dose_unit == "mcg/kg/min"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTremi[med_dose_unit == "mcg"]
+      
+      # ---------------------------
+      # BOLUS: mcg doses within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mcg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # intervals
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # convert to mcg/min, then integrate to mcg
+      inf2[, remi_rate_mcg_min := med_dose * weight_kg]
+      inf2[, infusion_mcg := remi_rate_mcg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(remi_rate_mcg_min),
+        .(
+          infusion_mcg_48h = sum(infusion_mcg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # only count infusion if >= 60 minutes
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
+      
+      # Receipt of continuous remifentanil
+      cont_remi_receipt <<- unique(
+        inf_48[infusion_mcg_48h > 0, .(hospitalization_id)]
+      )
+      cont_remi_receipt[, cont_remi_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_remi_receipt) == 0) {
+        cont_remi_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_remi_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      remifentanil_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      remifentanil_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
+      remifentanil_total_48h[is.na(bolus_mcg_48h), bolus_mcg_48h := 0]
+      remifentanil_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      remifentanil_total_48h[, remifentanil_total_48 := infusion_mcg_48h + bolus_mcg_48h]
+      remifentanil_total_48h <- remifentanil_total_48h[, .(
+        hospitalization_id,
+        remifentanil_total_48
+      )]
+      
+      remifentanil_total_48h[, remifentanil_total_mme_48 := remifentanil_total_48 * 0.1]
+      
+      # Merge in duration and weight
+      remifentanil_total_48h <- merge(
+        remifentanil_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final,
+          weight_kg
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      remifentanil_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Weight-based average rate including boluses:
+      # total mcg / (kg * minutes) = mcg/kg/min
+      remifentanil_total_48h[, remifentanil_avg_mcgkgmin_48 :=
+        remifentanil_total_48 / (weight_kg * imv_hours_capped * 60)
+      ]
+      
+      remifentanil_total_48h[
+        weight_kg <= 0 | imv_hours_capped <= 0,
+        remifentanil_avg_mcgkgmin_48 := NA_real_
+      ]
+      
+      remifentanil_total_48h[, .(
+        hospitalization_id,
+        remifentanil_total_48,
+        remifentanil_total_mme_48,
+        remifentanil_avg_mcgkgmin_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "remifentanil_total_48",
+  "remifentanil_total_mme_48",
+  "remifentanil_avg_mcgkgmin_48"
+),
+med_name = "remifentanil")
+################################################################################
+# Midazolam
+################################################################################
+midazolam_total_48h <- safe_med_eval({
+  
+  midazolam_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "midazolam"
+  ]
+  
+  midazolam_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "midazolam"
+  ]
+  
+  # If no midazolam exists in either source, return empty shells
+  if (nrow(midazolam_cont) == 0 && nrow(midazolam_int) == 0) {
+    
+    cont_midaz_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_midaz_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "midaz_total_48",
+      "midazolam_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    midazolam_combined <- merge(
+      midazolam_cont,
+      midazolam_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(midazolam_combined, hospitalization_id, admin_dttm)
+    
+    midazolam_expanded <- merge(
+      midazolam_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    midazolam_expanded <- midazolam_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(midazolam_expanded) == 0) {
+      
+      cont_midaz_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_midaz_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "midaz_total_48",
+        "midazolam_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTmidaz <- copy(midazolam_expanded)
+      
+      DTmidaz[, begin_imv := as.POSIXct(begin_imv)]
+      DTmidaz[, end_imv := as.POSIXct(end_imv)]
+      DTmidaz[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTmidaz[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTmidaz[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTmidaz[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTmidaz[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTmidaz[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg doses within 48h
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_48 <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_48, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # durations
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, midaz_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := midaz_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(midaz_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # zero out infusion dose if < 60 minutes total infusion time
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous midazolam
+      cont_midaz_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_midaz_receipt[, cont_midaz_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_midaz_receipt) == 0) {
+        cont_midaz_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_midaz_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      midazolam_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      midazolam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      midazolam_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      
+      midazolam_total_48h[, midaz_total_48 := infusion_mg_48h + bolus_mg_48h]
+      midazolam_total_48h <- midazolam_total_48h[, .(
+        hospitalization_id,
+        midaz_total_48
+      )]
+      
+      # Merge in duration
+      midazolam_total_48h <- merge(
+        midazolam_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      midazolam_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      midazolam_total_48h[, midazolam_avg_mghr_48 := midaz_total_48 / imv_hours_capped]
+      midazolam_total_48h[imv_hours_capped <= 0, midazolam_avg_mghr_48 := NA_real_]
+      
+      midazolam_total_48h[, .(
+        hospitalization_id,
+        midaz_total_48,
+        midazolam_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "midaz_total_48",
+  "midazolam_avg_mghr_48"
+),
+med_name = "midazolam")
+################################################################################
+# Lorazepam
+################################################################################
+lorazepam_total_48h <- safe_med_eval({
+  
+  lorazepam_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "lorazepam"
+  ]
+  
+  lorazepam_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "lorazepam"
+  ]
+  
+  # If no lorazepam exists in either source, return empty shells
+  if (nrow(lorazepam_cont) == 0 && nrow(lorazepam_int) == 0) {
+    
+    cont_loraz_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_loraz_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "loraz_total_48",
+      "lorazepam_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    lorazepam_combined <- merge(
+      lorazepam_cont,
+      lorazepam_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(lorazepam_combined, hospitalization_id, admin_dttm)
+    
+    lorazepam_expanded <- merge(
+      lorazepam_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    lorazepam_expanded <- lorazepam_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(lorazepam_expanded) == 0) {
+      
+      cont_loraz_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_loraz_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "loraz_total_48",
+        "lorazepam_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTloraz <- copy(lorazepam_expanded)
+      
+      DTloraz[, begin_imv := as.POSIXct(begin_imv)]
+      DTloraz[, end_imv := as.POSIXct(end_imv)]
+      DTloraz[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTloraz[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTloraz[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTloraz[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTloraz[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTloraz[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg doses within 48h
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_48 <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_48, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # durations
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, loraz_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := loraz_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(loraz_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # zero out infusion dose if < 60 minutes total infusion time
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous lorazepam
+      cont_loraz_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_loraz_receipt[, cont_loraz_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_loraz_receipt) == 0) {
+        cont_loraz_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_loraz_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      lorazepam_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      lorazepam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      lorazepam_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      
+      lorazepam_total_48h[, loraz_total_48 := infusion_mg_48h + bolus_mg_48h]
+      lorazepam_total_48h <- lorazepam_total_48h[, .(
+        hospitalization_id,
+        loraz_total_48
+      )]
+      
+      # Merge in duration
+      lorazepam_total_48h <- merge(
+        lorazepam_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      lorazepam_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      lorazepam_total_48h[, lorazepam_avg_mghr_48 := loraz_total_48 / imv_hours_capped]
+      lorazepam_total_48h[imv_hours_capped <= 0, lorazepam_avg_mghr_48 := NA_real_]
+      
+      lorazepam_total_48h[, .(
+        hospitalization_id,
+        loraz_total_48,
+        lorazepam_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "loraz_total_48",
+  "lorazepam_avg_mghr_48"
+),
+med_name = "lorazepam")
+################################################################################
+# Diazepam
+################################################################################
+diazepam_total_48h <- safe_med_eval({
+  
+  diazepam_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "diazepam"
+  ]
+  
+  diazepam_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "diazepam"
+  ]
+  
+  # If no diazepam exists in either source, return empty shells
+  if (nrow(diazepam_cont) == 0 && nrow(diazepam_int) == 0) {
+    
+    cont_diaz_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_diaz_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "diaz_total_48",
+      "diazepam_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    diazepam_combined <- merge(
+      diazepam_cont,
+      diazepam_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(diazepam_combined, hospitalization_id, admin_dttm)
+    
+    diazepam_expanded <- merge(
+      diazepam_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    diazepam_expanded <- diazepam_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(diazepam_expanded) == 0) {
+      
+      cont_diaz_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_diaz_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "diaz_total_48",
+        "diazepam_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTdiaz <- copy(diazepam_expanded)
+      
+      DTdiaz[, begin_imv := as.POSIXct(begin_imv)]
+      DTdiaz[, end_imv := as.POSIXct(end_imv)]
+      DTdiaz[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTdiaz[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTdiaz[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTdiaz[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTdiaz[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTdiaz[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg doses within 48h
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_48 <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_48, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # durations
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, diaz_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := diaz_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(diaz_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # zero out infusion dose if < 60 minutes total infusion time
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous diazepam
+      cont_diaz_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_diaz_receipt[, cont_diaz_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_diaz_receipt) == 0) {
+        cont_diaz_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_diaz_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      diazepam_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      diazepam_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      diazepam_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      
+      diazepam_total_48h[, diaz_total_48 := infusion_mg_48h + bolus_mg_48h]
+      diazepam_total_48h <- diazepam_total_48h[, .(
+        hospitalization_id,
+        diaz_total_48
+      )]
+      
+      # Merge in duration
+      diazepam_total_48h <- merge(
+        diazepam_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      diazepam_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      diazepam_total_48h[, diazepam_avg_mghr_48 := diaz_total_48 / imv_hours_capped]
+      diazepam_total_48h[imv_hours_capped <= 0, diazepam_avg_mghr_48 := NA_real_]
+      
+      diazepam_total_48h[, .(
+        hospitalization_id,
+        diaz_total_48,
+        diazepam_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "diaz_total_48",
+  "diazepam_avg_mghr_48"
+),
+med_name = "diazepam")
+################################################################################
+# Ketamine
+###############################################################################
+ketamine_total_48h <- safe_med_eval({
+  
+  ketamine_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "ketamine"
+  ]
+  
+  ketamine_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "ketamine"
+  ]
+  
+  # If no ketamine exists in either source, return empty shells
+  if (nrow(ketamine_cont) == 0 && nrow(ketamine_int) == 0) {
+    
+    cont_ketamine_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_ketamine_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "ketamine_total_48",
+      "ketamine_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    ketamine_combined <- merge(
+      ketamine_cont,
+      ketamine_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(ketamine_combined, hospitalization_id, admin_dttm)
+    
+    ketamine_expanded <- merge(
+      ketamine_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    ketamine_expanded <- ketamine_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(ketamine_expanded) == 0) {
+      
+      cont_ketamine_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_ketamine_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "ketamine_total_48",
+        "ketamine_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTketa <- copy(ketamine_expanded)
+      
+      DTketa[, begin_imv := as.POSIXct(begin_imv)]
+      DTketa[, end_imv := as.POSIXct(end_imv)]
+      DTketa[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTketa[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTketa[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTketa[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTketa[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTketa[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at the same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # intervals
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, ketamine_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := ketamine_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(ketamine_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # require >=60 minutes infusion
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous ketamine
+      cont_ketamine_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_ketamine_receipt[, cont_ketamine_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_ketamine_receipt) == 0) {
+        cont_ketamine_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_ketamine_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      ketamine_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      ketamine_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      ketamine_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      ketamine_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      ketamine_total_48h[, ketamine_total_48 := infusion_mg_48h + bolus_mg_48h]
+      ketamine_total_48h <- ketamine_total_48h[, .(
+        hospitalization_id,
+        ketamine_total_48
+      )]
+      
+      # Merge in duration
+      ketamine_total_48h <- merge(
+        ketamine_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      ketamine_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      ketamine_total_48h[, ketamine_avg_mghr_48 := ketamine_total_48 / imv_hours_capped]
+      ketamine_total_48h[imv_hours_capped <= 0, ketamine_avg_mghr_48 := NA_real_]
+      
+      ketamine_total_48h[, .(
+        hospitalization_id,
+        ketamine_total_48,
+        ketamine_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "ketamine_total_48",
+  "ketamine_avg_mghr_48"
+),
+med_name = "ketamine")
+###############################################################################
+# Pentobarbital
+###############################################################################
+pentobarbital_total_48h <- safe_med_eval({
+  
+  pentobarbital_cont <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "pentobarbital"
+  ]
+  
+  pentobarbital_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "pentobarbital"
+  ]
+  
+  # If no pentobarbital exists in either source, return empty shells
+  if (nrow(pentobarbital_cont) == 0 && nrow(pentobarbital_int) == 0) {
+    
+    cont_pentobarbital_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_pentobarbital_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "pentobarbital_total_48",
+      "pentobarbital_avg_mghr_48"
+    ))
+    
+  } else {
+    
+    pentobarbital_combined <- merge(
+      pentobarbital_cont,
+      pentobarbital_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    setorder(pentobarbital_combined, hospitalization_id, admin_dttm)
+    
+    pentobarbital_expanded <- merge(
+      pentobarbital_combined,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    pentobarbital_expanded <- pentobarbital_expanded[!is.na(med_dose)]
+    
+    # normalize units for matching/conversion
+    pentobarbital_expanded[, med_dose_unit := trimws(tolower(med_dose_unit))]
+    
+    # Convert weight-based infusion units to mg/hr where possible
+    pentobarbital_expanded[
+      med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+      `:=`(
+        med_dose = med_dose * weight_kg,
+        med_dose_unit = "mg/hr"
+      )
+    ]
+    
+    pentobarbital_expanded[
+      med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+      `:=`(
+        med_dose = (med_dose * weight_kg) / 1000,
+        med_dose_unit = "mg/hr"
+      )
+    ]
+    
+    pentobarbital_expanded[
+      med_dose_unit == "mcg/hr",
+      `:=`(
+        med_dose = med_dose / 1000,
+        med_dose_unit = "mg/hr"
+      )
+    ]
+    
+    pentobarbital_expanded[
+      med_dose_unit == "mcg",
+      `:=`(
+        med_dose = med_dose / 1000,
+        med_dose_unit = "mg"
+      )
+    ]
+    
+    # Drop rows that still cannot be interpreted safely
+    pentobarbital_expanded <- pentobarbital_expanded[
+      !(med_dose_unit %in% c("mg/kg/hr", "mcg/kg/hr") & (is.na(weight_kg) | weight_kg <= 0))
+    ]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(pentobarbital_expanded) == 0) {
+      
+      cont_pentobarbital_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_pentobarbital_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "pentobarbital_total_48",
+        "pentobarbital_avg_mghr_48"
+      ))
+      
+    } else {
+      
+      DTpento <- copy(pentobarbital_expanded)
+      
+      DTpento[, begin_imv := as.POSIXct(begin_imv)]
+      DTpento[, end_imv := as.POSIXct(end_imv)]
+      DTpento[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize again just in case
+      DTpento[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTpento[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTpento[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTpento[med_dose_unit == "mg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTpento[med_dose_unit == "mg"]
+      
+      # ---------------------------
+      # BOLUS: mg within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][
+        , admin_dttm := begin_imv
+      ]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      # if multiple rows at same timestamp, keep the last one
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      # intervals
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      
+      # integrate: mg/hr -> mg/min -> mg
+      inf2[, pentobarbital_rate_mg_min := med_dose / 60]
+      inf2[, infusion_mg := pentobarbital_rate_mg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(pentobarbital_rate_mg_min),
+        .(
+          infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      # require >=60 minutes infusion
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+      
+      # Receipt of continuous pentobarbital
+      cont_pentobarbital_receipt <<- unique(
+        inf_48[infusion_mg_48h > 0, .(hospitalization_id)]
+      )
+      cont_pentobarbital_receipt[, cont_pentobarbital_receipt := 1L]
+      
+      # If no qualifying receipt rows, keep empty shell
+      if (nrow(cont_pentobarbital_receipt) == 0) {
+        cont_pentobarbital_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_pentobarbital_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      pentobarbital_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      pentobarbital_total_48h[is.na(infusion_mg_48h), infusion_mg_48h := 0]
+      pentobarbital_total_48h[is.na(bolus_mg_48h), bolus_mg_48h := 0]
+      pentobarbital_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      pentobarbital_total_48h[, pentobarbital_total_48 := infusion_mg_48h + bolus_mg_48h]
+      pentobarbital_total_48h <- pentobarbital_total_48h[, .(
+        hospitalization_id,
+        pentobarbital_total_48
+      )]
+      
+      # Merge in duration
+      pentobarbital_total_48h <- merge(
+        pentobarbital_total_48h,
+        final_cohort_imv_runs[, .(
+          hospitalization_id,
+          imv_duration_hours_final
+        )],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      # Cap at 48h
+      pentobarbital_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48, 48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mg/hr
+      pentobarbital_total_48h[, pentobarbital_avg_mghr_48 := pentobarbital_total_48 / imv_hours_capped]
+      pentobarbital_total_48h[imv_hours_capped <= 0, pentobarbital_avg_mghr_48 := NA_real_]
+      
+      pentobarbital_total_48h[, .(
+        hospitalization_id,
+        pentobarbital_total_48,
+        pentobarbital_avg_mghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "pentobarbital_total_48",
+  "pentobarbital_avg_mghr_48"
+),
+med_name = "pentobarbital")
 
-# Iterative Merge on Hospitalization_id and recorded_dttm to form time_dependent_timeline
-summary_meds_data <- reduce(tables_merge_meds, function(x, y) merge(x, y, by = c("hospitalization_id"), all = TRUE))
+# Failsafe in case of unexpected scoping issue
+if (!exists("cont_pentobarbital_receipt")) {
+  cont_pentobarbital_receipt <- empty_med_table(c(
+    "hospitalization_id",
+    "cont_pentobarbital_receipt"
+  ))
+}
+
+################################################################################
+# Continuous Paralytics
+###############################################################################
+paralytics_final <- safe_med_eval({
+  
+  paralytics <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_group == "paralytics"
+  ]
+  
+  # If no continuous paralytics exist, return empty shell
+  if (nrow(paralytics) == 0) {
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "continuous_nmba_48",
+      "continuous_nmba_start_48",
+      "continuous_nmba_hours_48",
+      "paralytics_total_cont_48"
+    ))
+    
+  } else {
+    
+    setorder(paralytics, hospitalization_id, admin_dttm)
+    
+    paralytics_expanded <- merge(
+      paralytics,
+      final_cohort_imv_runs,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    paralytics_expanded <- paralytics_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shell
+    if (nrow(paralytics_expanded) == 0) {
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "continuous_nmba_48",
+        "continuous_nmba_start_48",
+        "continuous_nmba_hours_48",
+        "paralytics_total_cont_48"
+      ))
+      
+    } else {
+      
+      DTparalytics <- copy(paralytics_expanded)
+      
+      DTparalytics[, begin_imv := as.POSIXct(begin_imv)]
+      DTparalytics[, end_imv := as.POSIXct(end_imv)]
+      DTparalytics[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      # normalize med_dose_unit for robustness
+      DTparalytics[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTparalytics[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # If end_imv is earlier than begin_imv + 48h, cap there
+      DTparalytics[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # ---------------------------
+      # Continuous infusion only
+      # ---------------------------
+      inf <- DTparalytics[med_dose_unit == "mcg/kg/min"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      # If no qualifying infusion rows, return empty shell
+      if (nrow(inf) == 0) {
+        
+        empty_med_table(c(
+          "hospitalization_id",
+          "continuous_nmba_48",
+          "continuous_nmba_start_48",
+          "continuous_nmba_hours_48",
+          "paralytics_total_cont_48"
+        ))
+        
+      } else {
+        
+        # ---------------------------
+        # INFUSION timeline
+        # ---------------------------
+        baseline_rows <- inf[
+          admin_dttm >= start_grace & admin_dttm < begin_imv,
+          .SD[.N],
+          by = hospitalization_id
+        ][
+          , admin_dttm := begin_imv
+        ]
+        
+        inf_0_48 <- inf[
+          admin_dttm >= begin_imv & admin_dttm <= window_end
+        ]
+        
+        inf2 <- rbindlist(
+          list(inf_0_48, baseline_rows),
+          use.names = TRUE,
+          fill = TRUE
+        )
+        
+        setorder(inf2, hospitalization_id, admin_dttm)
+        inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+        
+        inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+        
+        inf2[, interval_end := fifelse(
+          is.na(next_admin_dttm),
+          window_end,
+          pmin(next_admin_dttm, window_end)
+        )]
+        
+        inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+        
+        # convert infusion rate: mcg/kg/min -> mcg/min
+        inf2[, paralytics_rate_mcg_min := med_dose * weight_kg]
+        inf2[, infusion_mg := (paralytics_rate_mcg_min * duration_min) / 1000]
+        
+        # Keep only valid infusion intervals
+        inf2_valid <- inf2[
+          duration_min > 0 & !is.na(paralytics_rate_mcg_min)
+        ]
+        
+        # Summarize start time and infusion duration in first 48h
+        paralytics_inf_summary <- inf2_valid[
+          ,
+          .(
+            continuous_nmba_start_48 = min(admin_dttm, na.rm = TRUE),
+            continuous_nmba_minutes_48 = sum(duration_min, na.rm = TRUE),
+            continuous_nmba_hours_48 = sum(duration_min, na.rm = TRUE) / 60
+          ),
+          by = hospitalization_id
+        ]
+        
+        # Apply 60-minute rule
+        paralytics_inf_summary[continuous_nmba_minutes_48 < 60, `:=`(
+          continuous_nmba_start_48 = as.POSIXct(NA),
+          continuous_nmba_hours_48 = 0
+        )]
+        
+        # Total dose in first 48h
+        inf_48 <- inf2_valid[
+          ,
+          .(
+            infusion_mg_48h = sum(infusion_mg, na.rm = TRUE),
+            infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+          ),
+          by = hospitalization_id
+        ]
+        
+        # zero out infusion dose if < 60 minutes total infusion time
+        inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+        inf_48[infusion_minutes_48h < 60, infusion_mg_48h := 0]
+        
+        # Final continuous paralytic total
+        paralytics_cont_48h <- inf_48[, .(
+          hospitalization_id,
+          paralytics_total_cont_48 = infusion_mg_48h
+        )]
+        
+        # Merge in timing summary
+        paralytics_cont_48h <- merge(
+          paralytics_cont_48h,
+          paralytics_inf_summary[, .(
+            hospitalization_id,
+            continuous_nmba_start_48,
+            continuous_nmba_hours_48
+          )],
+          by = "hospitalization_id",
+          all = TRUE
+        )
+        
+        # Merge onto cohort ids so missing patients are retained
+        paralytics_final <- merge(
+          final_cohort_imv_runs[, .(hospitalization_id)],
+          paralytics_cont_48h,
+          by = "hospitalization_id",
+          all.x = TRUE
+        )
+        
+        # Fill in missing values
+        paralytics_final[is.na(paralytics_total_cont_48), paralytics_total_cont_48 := 0]
+        paralytics_final[is.na(continuous_nmba_hours_48), continuous_nmba_hours_48 := 0]
+        
+        # Binary indicator
+        paralytics_final[, continuous_nmba_48 := as.integer(paralytics_total_cont_48 > 0)]
+        
+        paralytics_final[, .(
+          hospitalization_id,
+          continuous_nmba_48,
+          continuous_nmba_start_48,
+          continuous_nmba_hours_48,
+          paralytics_total_cont_48
+        )]
+      }
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "continuous_nmba_48",
+  "continuous_nmba_start_48",
+  "continuous_nmba_hours_48",
+  "paralytics_total_cont_48"
+),
+med_name = "continuous_paralytics")
+################################################################################
+# Push Paralytics
+###############################################################################
+paralytic_pushes_first_48h_final <- safe_med_eval({
+  
+  paralytic_pushes <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_group == "paralytics"
+  ]
+  
+  # If no paralytic pushes exist, return empty shell
+  if (nrow(paralytic_pushes) == 0) {
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "push_paralytics"
+    ))
+    
+  } else {
+    
+    setorder(paralytic_pushes, hospitalization_id, admin_dttm)
+    
+    reduced_hosp_info <- final_cohort_imv_runs[, .(
+      hospitalization_id,
+      begin_imv,
+      end_imv
+    )]
+    
+    paralytics_hosp_merge <- merge(
+      paralytic_pushes,
+      reduced_hosp_info,
+      by = "hospitalization_id",
+      all = TRUE
+    )
+    
+    paralytics_hosp_merge <- paralytics_hosp_merge[
+      !is.na(med_dose) & med_dose > 0
+    ]
+    
+    # If merge/filter leaves no usable rows, return empty shell
+    if (nrow(paralytics_hosp_merge) == 0) {
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "push_paralytics"
+      ))
+      
+    } else {
+      
+      DTpushpar <- copy(paralytics_hosp_merge)
+      
+      DTpushpar[, begin_imv := as.POSIXct(begin_imv)]
+      DTpushpar[, end_imv := as.POSIXct(end_imv)]
+      DTpushpar[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      DTpushpar[, `:=`(
+        start_4h = begin_imv + 4 * 60 * 60,
+        end_48h = begin_imv + 48 * 60 * 60
+      )]
+      
+      # Cap at end_imv if shorter than 48h
+      DTpushpar[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      paralytic_pushes_first_48h <- DTpushpar[
+        admin_dttm >= start_4h & admin_dttm <= window_end
+      ]
+      
+      # If no pushes in window, return empty shell
+      if (nrow(paralytic_pushes_first_48h) == 0) {
+        
+        empty_med_table(c(
+          "hospitalization_id",
+          "push_paralytics"
+        ))
+        
+      } else {
+        
+        paralytic_pushes_first_48h_final <- unique(
+          paralytic_pushes_first_48h[, .(hospitalization_id)],
+          by = "hospitalization_id"
+        )
+        
+        paralytic_pushes_first_48h_final[, push_paralytics := 1L]
+        
+        paralytic_pushes_first_48h_final[, .(
+          hospitalization_id,
+          push_paralytics
+        )]
+      }
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "push_paralytics"
+),
+med_name = "push_paralytics")
+################################################################################
+# Merge all meds tables
+
+tables_merge_meds <- list(
+  propofol_total_48h,
+  cont_prop_receipt,
+  precedex_total_48h,
+  cont_precedex_receipt,
+  fentanyl_total_48h,
+  cont_fent_receipt,
+  hydromorphone_total_48h,
+  cont_hydro_receipt,
+  morphine_total_48h,
+  cont_morphine_receipt,
+  remifentanil_total_48h,
+  cont_remi_receipt,
+  midazolam_total_48h,
+  cont_midaz_receipt,
+  lorazepam_total_48h,
+  cont_loraz_receipt,
+  diazepam_total_48h,
+  cont_diaz_receipt,
+  ketamine_total_48h,
+  cont_ketamine_receipt,
+  pentobarbital_total_48h,
+  cont_pentobarbital_receipt,
+  paralytics_final,
+  paralytic_pushes_first_48h_final
+)
+
+summary_meds_data <- safe_merge_meds(
+  tables = tables_merge_meds,
+  cohort_ids = final_cohort_imv_runs
+)
 
 # Fill in binary variables with 0 if missing 
 
@@ -4810,7 +6524,10 @@ summary_meds_data <- reduce(tables_merge_meds, function(x, y) merge(x, y, by = c
 cont_cols <- grep("^cont_", names(summary_meds_data), value = TRUE)
 
 # Replace NA with 0 for those columns
-summary_meds_data[, (cont_cols) := lapply(.SD, function(x) as.integer(fcoalesce(x, 0) > 0)), .SDcols = cont_cols]
+summary_meds_data[, (cont_cols) := 
+  lapply(.SD, function(x) as.integer(!is.na(x) & x > 0)),
+  .SDcols = cont_cols
+]
 
 # Any continuous opioid receipt
 summary_meds_data[, cont_opioids_receipt := as.integer(
@@ -4829,8 +6546,10 @@ summary_meds_data[, cont_benzos_receipt := as.integer(
 
 # Any continuous sedation receipt
 summary_meds_data[, cont_sedation_receipt := as.integer(
-  fcoalesce(propofol_avg_mcgkgmin_48, 0) > 0 |
-  fcoalesce(dexmedetomidine_avg_mcgkghr_48, 0) > 0 |
+  fcoalesce(cont_prop_receipt, 0L) == 1 |
+  fcoalesce(cont_precedex_receipt, 0L) == 1 |
+  fcoalesce(cont_ketamine_receipt, 0L) == 1 |
+  fcoalesce(cont_pentobarbital_receipt, 0L) == 1 |
   fcoalesce(cont_benzos_receipt, 0L) == 1
 )]
 
@@ -4863,13 +6582,14 @@ summary_meds_data[, `:=`(
 
 # Reduce
 summary_meds_data_final <- summary_meds_data[, .(hospitalization_id, propofol_avg_mcgkgmin_48,
-                                           dexmedetomidine_avg_mcgkghr_48, 
-                                           cont_opioids_receipt, cont_benzos_receipt, 
+                                           dexmedetomidine_avg_mcgkghr_48, cont_prop_receipt,
+                                           cont_precedex_receipt, cont_opioids_receipt, 
+                                           cont_benzos_receipt, cont_ketamine_receipt, cont_pentobarbital_receipt,
                                            total_mme, lorazepam_equiv_total_48, 
                                            continuous_nmba_48, continuous_nmba_start_48,
                                            continuous_nmba_hours_48, push_paralytics, cont_analgesia_only)]
-
 ```
+
 
 # PART SIX: Identify acute respiratory failure patients, % deep sedation
 ```{r}
@@ -5508,7 +7228,7 @@ primary_analysis_raw <- reduce(primary_analysis_tables, function(x, y) merge(x, 
 # Replace NA values in rass_below_minus_3_count with 0
 setnafill(primary_analysis_raw, cols = "rass_below_minus_3_count", fill = 0)
 
-primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, top_five_non_eng_non_spanish, non_eng, three_language_cat, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, laps2, deep_sedation_weighted, rass_weighted_avg, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, pf_selected, pf_source, pf_recorded_dttm, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
+primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted, rass_weighted_avg, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, cont_prop_receipt, cont_precedex_receipt, cont_ketamine_receipt, cont_pentobarbital_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, pf_selected, pf_source, pf_recorded_dttm, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
 
 #Add Observation Year
 primary_analysis_analytic[, observation_year := year(begin_imv)]
