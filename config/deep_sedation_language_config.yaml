@@ -1,5 +1,0 @@
-data_dir: "/share/projects/data/circe/v20251231/clif/"
-local_dir: "/share/home/ortiza/my_projects/deep_sedation_language_final/"
-file_type: ".parquet"
-institution: "Penn"
-time_zone: "EST"
