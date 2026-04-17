@@ -52,6 +52,8 @@ cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics/")
 sedation_project <- file.path(final_data_dir, "sedation_project/")
 sedation_tables_dir <- file.path(sedation_project, "final_tables/")
 sedation_final_data <- file.path(sedation_project, "final_data/")
+sedation_sensitivity <- file.path(sedation_final_data, "sensitivity_analyses/")
+sedation_secondary <- file.path(sedation_final_data, "secondary_analyses/")
 paralytics_project <- file.path(final_data_dir, "paralytics_project/")
 paralytics_tables_dir <- file.path(sedation_project, "final_tables/")  
 paralytics_final_data <- file.path(sedation_project, "final_data/")
@@ -59,7 +61,7 @@ file_type <- config$file_type
 institution <- config$institution
 time_zone <- config$time_zone
 
-dirs_to_create <- c(output_dir, intermediate_dir, final_data_dir, sedation_project, sedation_tables_dir, sedation_final_data, paralytics_project, paralytics_tables_dir, paralytics_final_data, cohort_characteristics)
+dirs_to_create <- c(output_dir, intermediate_dir, final_data_dir, sedation_project, sedation_tables_dir, sedation_final_data, sedation_sensitivity, sedation_secondary, paralytics_project, paralytics_tables_dir, paralytics_final_data, cohort_characteristics)
 for (dir in dirs_to_create) {
   if (!dir.exists(dir)) {
     dir.create(dir, recursive = TRUE)
@@ -232,71 +234,81 @@ make_table1_federated <- function(dt,
 }
 
 # Table 1: Comparative
-
-make_table1_comparisons <- function(dt,
-                                    by,
-                                    cont_vars = NULL,
-                                    cat_vars = NULL,
-                                    site_name = NA_character_,
-                                    group_levels = NULL,
-                                    fisher_if_expected_lt5 = TRUE) {
+make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
+                                    site_name = NA_character_, group_levels = NULL,
+                                    reference_level = NULL, fisher_if_expected_lt5 = TRUE) {
   dt <- as.data.table(copy(dt))
   
-  if (!(by %in% names(dt))) {
-    stop(sprintf("Grouping variable '%s' not found in dt.", by))
-  }
-  
-  # Keep only non-missing comparison groups
+  if (!(by %in% names(dt))) stop(sprintf("Grouping variable '%s' not found in dt.", by))
   dt <- dt[!is.na(get(by))]
-  
-  # Force grouping variable to character first
   dt[, (by) := as.character(get(by))]
   
-  # Determine the two groups
   observed_groups <- unique(dt[[by]])
   observed_groups <- observed_groups[!is.na(observed_groups)]
   
-  if (!is.null(group_levels)) {
-    if (length(group_levels) != 2) {
-      stop("group_levels must have length 2.")
-    }
-    if (!all(group_levels %in% observed_groups)) {
-      stop("Not all specified group_levels are present in the data.")
-    }
-    groups <- group_levels
+  if (!is.null(reference_level)) {
+    if (!reference_level %in% observed_groups)
+      stop(sprintf("reference_level '%s' not found in data.", reference_level))
+    ref <- reference_level
+    comparators <- if (!is.null(group_levels)) group_levels[group_levels != ref] else sort(observed_groups[observed_groups != ref])
   } else {
-    if (length(observed_groups) != 2) {
-      stop(sprintf(
-        "Grouping variable '%s' must have exactly 2 non-missing groups. Found: %s",
-        by,
-        paste(observed_groups, collapse = ", ")
-      ))
+    if (!is.null(group_levels)) {
+      if (length(group_levels) != 2) stop("group_levels must have length 2.")
+      ref <- group_levels[1]; comparators <- group_levels[2]
+    } else {
+      if (length(observed_groups) != 2)
+        stop(sprintf("Found %s groups — supply reference_level for 3+ groups.", paste(observed_groups, collapse = ", ")))
+      grps <- sort(observed_groups); ref <- grps[1]; comparators <- grps[2]
     }
-    groups <- sort(observed_groups)
   }
-  
-  g1 <- groups[1]
-  g2 <- groups[2]
-  comparison_label <- paste0(by, ": ", g2, " vs ", g1)
-  
-  out_list <- list()
-  
+
+  #--------------------------------------------------#
+  # Helper: multilevel categorical SMD
+  #--------------------------------------------------#
+  calc_multilevel_smd <- function(x, group, g1, g2) {
+    dsub <- data.table(x = as.character(x), group = as.character(group))
+    dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
+    dsub[is.na(x), x := "missing"]
+    levs <- sort(unique(dsub$x))
+    if (length(levs) < 2) return(NA_real_)
+    ref_lev <- levs[1]
+    keep_levs <- levs[levs != ref_lev]
+    make_indicator_matrix <- function(vals, levels_keep) {
+      out <- sapply(levels_keep, function(lv) as.numeric(vals == lv))
+      if (is.null(dim(out))) { out <- matrix(out, ncol = 1); colnames(out) <- levels_keep }
+      out
+    }
+    x1 <- dsub[group == g1, x]; x2 <- dsub[group == g2, x]
+    if (length(x1) < 2 || length(x2) < 2) return(NA_real_)
+    M1 <- make_indicator_matrix(x1, keep_levs)
+    M2 <- make_indicator_matrix(x2, keep_levs)
+    p1 <- colMeans(M1); p2 <- colMeans(M2); d <- p2 - p1
+    S1 <- stats::cov(M1); S2 <- stats::cov(M2)
+    if (is.null(dim(S1))) S1 <- matrix(S1, nrow = 1, ncol = 1)
+    if (is.null(dim(S2))) S2 <- matrix(S2, nrow = 1, ncol = 1)
+    S_pooled <- (S1 + S2) / 2
+    S_inv <- try(solve(S_pooled), silent = TRUE)
+    if (inherits(S_inv, "try-error")) {
+      if (!requireNamespace("MASS", quietly = TRUE)) return(NA_real_)
+      S_inv <- try(MASS::ginv(S_pooled), silent = TRUE)
+      if (inherits(S_inv, "try-error")) return(NA_real_)
+    }
+    as.numeric(sqrt(t(d) %*% S_inv %*% d))
+  }
+
   #--------------------------------------------------#
   # Helper: continuous variable comparison
   #--------------------------------------------------#
-  compare_continuous <- function(x, group, var_name) {
+  compare_continuous <- function(x, group, var_name, g1, g2, comparison_label) {
     dsub <- data.table(x = x, group = group)
     dsub <- dsub[!is.na(group)]
     
     x1 <- dsub[group == g1, x]
     x2 <- dsub[group == g2, x]
-    
     x1_nonmiss <- x1[!is.na(x1)]
     x2_nonmiss <- x2[!is.na(x2)]
     
-    n1 <- length(x1_nonmiss)
-    n2 <- length(x2_nonmiss)
-    
+    n1 <- length(x1_nonmiss); n2 <- length(x2_nonmiss)
     mean1 <- if (n1 > 0) mean(x1_nonmiss) else NA_real_
     mean2 <- if (n2 > 0) mean(x2_nonmiss) else NA_real_
     sd1   <- if (n1 > 1) sd(x1_nonmiss) else NA_real_
@@ -308,150 +320,57 @@ make_table1_comparisons <- function(dt,
     p75_1 <- if (n1 > 0) as.numeric(quantile(x1_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
     p75_2 <- if (n2 > 0) as.numeric(quantile(x2_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
     
-    # Mean difference and CI from Welch t-test
-    estimate <- NA_real_
-    ci_lower <- NA_real_
-    ci_upper <- NA_real_
-    p_value  <- NA_real_
+    estimate <- NA_real_; ci_lower <- NA_real_
+    ci_upper <- NA_real_; p_value  <- NA_real_
     test_used <- NA_character_
     
     if (n1 >= 2 && n2 >= 2) {
       tt <- try(t.test(x2_nonmiss, x1_nonmiss), silent = TRUE)
       if (!inherits(tt, "try-error")) {
-        estimate <- unname(mean2 - mean1)
-        ci_lower <- unname(tt$conf.int[1])
-        ci_upper <- unname(tt$conf.int[2])
-        p_value  <- tt$p.value
+        estimate  <- unname(mean2 - mean1)
+        ci_lower  <- unname(tt$conf.int[1])
+        ci_upper  <- unname(tt$conf.int[2])
+        p_value   <- tt$p.value
         test_used <- "welch_t_test"
       }
     }
     
-    # SMD = difference in means / pooled SD
-    pooled_sd <- NA_real_
-    smd <- NA_real_
+    pooled_sd <- NA_real_; smd <- NA_real_
     if (n1 >= 2 && n2 >= 2 && !is.na(sd1) && !is.na(sd2)) {
       pooled_sd <- sqrt(((n1 - 1) * sd1^2 + (n2 - 1) * sd2^2) / (n1 + n2 - 2))
-      if (!is.na(pooled_sd) && pooled_sd > 0) {
-        smd <- (mean2 - mean1) / pooled_sd
-      }
+      if (!is.na(pooled_sd) && pooled_sd > 0) smd <- (mean2 - mean1) / pooled_sd
     }
     
     data.table(
-      site = site_name,
-      variable = var_name,
-      variable_type = "continuous",
-      comparison = comparison_label,
-      level = NA_character_,
-      group1 = g1,
-      group2 = g2,
-      group1_n = n1,
-      group2_n = n2,
-      group1_mean = mean1,
-      group2_mean = mean2,
-      group1_sd = sd1,
-      group2_sd = sd2,
-      group1_median = med1,
-      group2_median = med2,
-      group1_p25 = p25_1,
-      group2_p25 = p25_2,
-      group1_p75 = p75_1,
-      group2_p75 = p75_2,
-      statistic = "mean_difference",
-      estimate = estimate,
-      ci_lower = ci_lower,
-      ci_upper = ci_upper,
-      p_value = p_value,
-      smd = smd,
-      effect_measure = "mean_difference",
-      test = test_used,
-      note = NA_character_
+      site = site_name, variable = var_name, variable_type = "continuous",
+      comparison = comparison_label, level = NA_character_,
+      group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+      group1_mean = mean1, group2_mean = mean2,
+      group1_sd = sd1, group2_sd = sd2,
+      group1_median = med1, group2_median = med2,
+      group1_p25 = p25_1, group2_p25 = p25_2,
+      group1_p75 = p75_1, group2_p75 = p75_2,
+      statistic = "mean_difference", estimate = estimate,
+      ci_lower = ci_lower, ci_upper = ci_upper, p_value = p_value,
+      smd = smd, effect_measure = "mean_difference",
+      test = test_used, note = NA_character_
     )
   }
-  
-  #--------------------------------------------------#
-  # Helper: multilevel categorical SMD
-  #--------------------------------------------------#
-  calc_multilevel_smd <- function(x, group, g1, g2) {
-    dsub <- data.table(
-      x = as.character(x),
-      group = as.character(group)
-    )
-    
-    dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
-    dsub[is.na(x), x := "missing"]
-    
-    levs <- sort(unique(dsub$x))
-    
-    # Need at least 2 levels
-    if (length(levs) < 2) return(NA_real_)
-    
-    # Use first level as reference, keep remaining K-1 levels
-    ref <- levs[1]
-    keep_levs <- levs[levs != ref]
-    
-    make_indicator_matrix <- function(vals, levels_keep) {
-      out <- sapply(levels_keep, function(lv) as.numeric(vals == lv))
-      if (is.null(dim(out))) {
-        out <- matrix(out, ncol = 1)
-        colnames(out) <- levels_keep
-      }
-      out
-    }
-    
-    x1 <- dsub[group == g1, x]
-    x2 <- dsub[group == g2, x]
-    
-    if (length(x1) < 2 || length(x2) < 2) return(NA_real_)
-    
-    M1 <- make_indicator_matrix(x1, keep_levs)
-    M2 <- make_indicator_matrix(x2, keep_levs)
-    
-    p1 <- colMeans(M1)
-    p2 <- colMeans(M2)
-    d  <- p2 - p1
-    
-    S1 <- stats::cov(M1)
-    S2 <- stats::cov(M2)
-    
-    if (is.null(dim(S1))) S1 <- matrix(S1, nrow = 1, ncol = 1)
-    if (is.null(dim(S2))) S2 <- matrix(S2, nrow = 1, ncol = 1)
-    
-    S_pooled <- (S1 + S2) / 2
-    
-    # Try regular inverse first; generalized inverse as fallback
-    S_inv <- try(solve(S_pooled), silent = TRUE)
-    if (inherits(S_inv, "try-error")) {
-      if (!requireNamespace("MASS", quietly = TRUE)) return(NA_real_)
-      S_inv <- try(MASS::ginv(S_pooled), silent = TRUE)
-      if (inherits(S_inv, "try-error")) return(NA_real_)
-    }
-    
-    smd <- as.numeric(sqrt(t(d) %*% S_inv %*% d))
-    smd
-  }
-  
+
   #--------------------------------------------------#
   # Helper: categorical variable comparison
   #--------------------------------------------------#
-  compare_categorical <- function(x, group, var_name) {
+  compare_categorical <- function(x, group, var_name, g1, g2, comparison_label) {
     dsub <- data.table(x = x, group = group)
     dsub <- dsub[!is.na(group)]
-    
-    # treat missing category as its own level if present
     dsub[, x := as.character(x)]
     dsub[is.na(x), x := "missing"]
     
     tab <- table(dsub$x, dsub$group)
-    
-    # Ensure both groups are present as columns in correct order
     needed_cols <- c(g1, g2)
     if (!all(needed_cols %in% colnames(tab))) {
-      full_tab <- matrix(
-        0,
-        nrow = nrow(tab),
-        ncol = 2,
-        dimnames = list(rownames(tab), needed_cols)
-      )
+      full_tab <- matrix(0, nrow = nrow(tab), ncol = 2,
+                         dimnames = list(rownames(tab), needed_cols))
       common_cols <- intersect(colnames(tab), needed_cols)
       full_tab[, common_cols] <- tab[, common_cols, drop = FALSE]
       tab <- full_tab
@@ -463,136 +382,74 @@ make_table1_comparisons <- function(dt,
     n1 <- sum(tab[, g1])
     n2 <- sum(tab[, g2])
     
-    overall_smd <- calc_multilevel_smd(
-      x = dsub$x,
-      group = dsub$group,
-      g1 = g1,
-      g2 = g2
-    )
+    overall_smd <- calc_multilevel_smd(dsub$x, dsub$group, g1, g2)
     
-    p_value <- NA_real_
-    test_used <- NA_character_
-    
+    p_value <- NA_real_; test_used <- NA_character_
     if (n_levels >= 1) {
       chisq_try <- try(chisq.test(tab, correct = FALSE), silent = TRUE)
-      
       if (!inherits(chisq_try, "try-error")) {
         expected <- chisq_try$expected
-        
         if (fisher_if_expected_lt5 && any(expected < 5)) {
           fisher_try <- try(fisher.test(tab), silent = TRUE)
           if (!inherits(fisher_try, "try-error")) {
-            p_value <- fisher_try$p.value
-            test_used <- "fisher_exact"
+            p_value <- fisher_try$p.value; test_used <- "fisher_exact"
           } else {
-            p_value <- chisq_try$p.value
-            test_used <- "chi_square"
+            p_value <- chisq_try$p.value; test_used <- "chi_square"
           }
         } else {
-          p_value <- chisq_try$p.value
-          test_used <- "chi_square"
+          p_value <- chisq_try$p.value; test_used <- "chi_square"
         }
       }
     }
     
-    # Overall categorical row for all categorical variables
     out <- data.table(
-      site = site_name,
-      variable = var_name,
-      variable_type = "categorical",
-      comparison = comparison_label,
-      level = NA_character_,
-      group1 = g1,
-      group2 = g2,
-      group1_n = n1,
-      group2_n = n2,
-      group1_mean = NA_real_,
-      group2_mean = NA_real_,
-      group1_sd = NA_real_,
-      group2_sd = NA_real_,
-      group1_median = NA_real_,
-      group2_median = NA_real_,
-      group1_p25 = NA_real_,
-      group2_p25 = NA_real_,
-      group1_p75 = NA_real_,
-      group2_p75 = NA_real_,
-      statistic = "overall_difference",
-      estimate = NA_real_,
-      ci_lower = NA_real_,
-      ci_upper = NA_real_,
-      p_value = p_value,
-      smd = overall_smd,
-      effect_measure = "categorical_smd",
-      test = test_used,
-      note = NA_character_
+      site = site_name, variable = var_name, variable_type = "categorical",
+      comparison = comparison_label, level = NA_character_,
+      group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+      group1_mean = NA_real_, group2_mean = NA_real_,
+      group1_sd = NA_real_, group2_sd = NA_real_,
+      group1_median = NA_real_, group2_median = NA_real_,
+      group1_p25 = NA_real_, group2_p25 = NA_real_,
+      group1_p75 = NA_real_, group2_p75 = NA_real_,
+      statistic = "overall_difference", estimate = NA_real_,
+      ci_lower = NA_real_, ci_upper = NA_real_, p_value = p_value,
+      smd = overall_smd, effect_measure = "categorical_smd",
+      test = test_used, note = NA_character_
     )
     
-    # If binary categorical, also compute risk difference and binary SMD
     if (n_levels == 2) {
       levels_x <- rownames(tab)
-      ref_level <- levels_x[1]
-      target_level <- levels_x[2]
-      
-      a <- as.numeric(tab[target_level, g2])  # target in group2
-      b <- as.numeric(tab[ref_level,   g2])   # ref in group2
-      c <- as.numeric(tab[target_level, g1])  # target in group1
-      d <- as.numeric(tab[ref_level,   g1])   # ref in group1
-      
+      ref_level <- levels_x[1]; target_level <- levels_x[2]
+      a <- as.numeric(tab[target_level, g2])
+      b <- as.numeric(tab[ref_level,   g2])
+      c <- as.numeric(tab[target_level, g1])
+      d <- as.numeric(tab[ref_level,   g1])
       p1 <- if ((c + d) > 0) c / (c + d) else NA_real_
       p2 <- if ((a + b) > 0) a / (a + b) else NA_real_
-      
-      # Risk difference
       rd <- if (!is.na(p1) && !is.na(p2)) p2 - p1 else NA_real_
-      rd_se <- if (!is.na(p1) && !is.na(p2) && (c + d) > 0 && (a + b) > 0) {
-        sqrt((p1 * (1 - p1) / (c + d)) + (p2 * (1 - p2) / (a + b)))
-      } else {
-        NA_real_
-      }
+      rd_se <- if (!is.na(p1) && !is.na(p2) && (c + d) > 0 && (a + b) > 0)
+        sqrt((p1 * (1 - p1) / (c + d)) + (p2 * (1 - p2) / (a + b))) else NA_real_
       rd_lcl <- if (!is.na(rd_se)) rd - 1.96 * rd_se else NA_real_
       rd_ucl <- if (!is.na(rd_se)) rd + 1.96 * rd_se else NA_real_
-      
-      # Binary SMD
       pooled_p <- if (!is.na(p1) && !is.na(p2)) (p1 + p2) / 2 else NA_real_
-      smd_binary <- if (!is.na(pooled_p) && pooled_p > 0 && pooled_p < 1) {
-        (p2 - p1) / sqrt(pooled_p * (1 - pooled_p))
-      } else {
-        NA_real_
-      }
+      smd_binary <- if (!is.na(pooled_p) && pooled_p > 0 && pooled_p < 1)
+        (p2 - p1) / sqrt(pooled_p * (1 - pooled_p)) else NA_real_
       
       out_rd <- data.table(
-        site = site_name,
-        variable = var_name,
-        variable_type = "categorical",
-        comparison = comparison_label,
-        level = target_level,
-        group1 = g1,
-        group2 = g2,
-        group1_n = n1,
-        group2_n = n2,
-        group1_mean = p1,
-        group2_mean = p2,
-        group1_sd = NA_real_,
-        group2_sd = NA_real_,
-        group1_median = NA_real_,
-        group2_median = NA_real_,
-        group1_p25 = NA_real_,
-        group2_p25 = NA_real_,
-        group1_p75 = NA_real_,
-        group2_p75 = NA_real_,
-        statistic = "risk_difference",
-        estimate = rd,
-        ci_lower = rd_lcl,
-        ci_upper = rd_ucl,
-        p_value = p_value,
-        smd = smd_binary,
-        effect_measure = "risk_difference",
+        site = site_name, variable = var_name, variable_type = "categorical",
+        comparison = comparison_label, level = target_level,
+        group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+        group1_mean = p1, group2_mean = p2,
+        group1_sd = NA_real_, group2_sd = NA_real_,
+        group1_median = NA_real_, group2_median = NA_real_,
+        group1_p25 = NA_real_, group2_p25 = NA_real_,
+        group1_p75 = NA_real_, group2_p75 = NA_real_,
+        statistic = "risk_difference", estimate = rd,
+        ci_lower = rd_lcl, ci_upper = rd_ucl, p_value = p_value,
+        smd = smd_binary, effect_measure = "risk_difference",
         test = test_used,
-        note = sprintf(
-          "Binary categorical variable. level='%s' treated as event.",
-          target_level
-        )
+        note = sprintf("Binary categorical variable. level='%s' treated as event.", target_level)
       )
-      
       out <- rbind(out, out_rd, fill = TRUE)
       
     } else if (n_levels > 2) {
@@ -601,55 +458,47 @@ make_table1_comparisons <- function(dt,
     
     out
   }
-  
+
   #--------------------------------------------------#
-  # Run continuous variables
+  # Loop over pairwise comparisons
   #--------------------------------------------------#
-  if (!is.null(cont_vars) && length(cont_vars) > 0) {
-    for (v in cont_vars) {
-      if (!(v %in% names(dt))) {
-        warning(sprintf("Continuous variable '%s' not found. Skipping.", v))
-        next
+  all_comparisons <- lapply(comparators, function(comp) {
+    g1 <- ref
+    g2 <- comp
+    comparison_label <- paste0(by, ": ", g2, " vs ", g1)
+    dt_pair <- dt[get(by) %in% c(g1, g2)]
+    out_list <- list()
+    
+    if (!is.null(cont_vars)) {
+      for (v in cont_vars) {
+        if (!(v %in% names(dt_pair))) { warning(sprintf("'%s' not found. Skipping.", v)); next }
+        out_list[[paste0("cont_", v)]] <- compare_continuous(dt_pair[[v]], dt_pair[[by]], v, g1, g2, comparison_label)
       }
-      out_list[[paste0("cont_", v)]] <- compare_continuous(
-        x = dt[[v]],
-        group = dt[[by]],
-        var_name = v
-      )
     }
-  }
-  
-  #--------------------------------------------------#
-  # Run categorical variables
-  #--------------------------------------------------#
-  if (!is.null(cat_vars) && length(cat_vars) > 0) {
-    for (v in cat_vars) {
-      if (!(v %in% names(dt))) {
-        warning(sprintf("Categorical variable '%s' not found. Skipping.", v))
-        next
+    
+    if (!is.null(cat_vars)) {
+      for (v in cat_vars) {
+        if (!(v %in% names(dt_pair))) { warning(sprintf("'%s' not found. Skipping.", v)); next }
+        out_list[[paste0("cat_", v)]] <- compare_categorical(dt_pair[[v]], dt_pair[[by]], v, g1, g2, comparison_label)
       }
-      out_list[[paste0("cat_", v)]] <- compare_categorical(
-        x = dt[[v]],
-        group = dt[[by]],
-        var_name = v
-      )
     }
-  }
+    
+    rbindlist(out_list, fill = TRUE, use.names = TRUE)
+  })
+
+  out <- rbindlist(all_comparisons, fill = TRUE, use.names = TRUE)
   
-  out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
-  
-  setcolorder(out, c(
+  desired_order <- c(
     "site", "variable", "variable_type", "comparison", "level",
-    "group1", "group2",
-    "group1_n", "group2_n",
-    "group1_mean", "group2_mean",
-    "group1_sd", "group2_sd",
-    "group1_median", "group2_median",
-    "group1_p25", "group2_p25",
+    "group1", "group2", "group1_n", "group2_n",
+    "group1_mean", "group2_mean", "group1_sd", "group2_sd",
+    "group1_median", "group2_median", "group1_p25", "group2_p25",
     "group1_p75", "group2_p75",
     "statistic", "estimate", "ci_lower", "ci_upper",
     "p_value", "smd", "effect_measure", "test", "note"
-  ))
+  )
+  existing_order <- desired_order[desired_order %in% names(out)]
+  setcolorder(out, existing_order)
   
   return(out[])
 }
@@ -691,11 +540,10 @@ total_cohort[, lang_cat_2 := fcase(
 
 # 3: English v Spanish v third most frequent hospital system wide language - all others NA
 # Define third_lang
-# Skip "Unknown or NA" if it appears in the 3rd position
 third_lang <- language_data[
-  !tolower(language_category) %in% c("unknown or na"),
+  !trimws(tolower(language_category)) %in% c("english", "spanish", "unknown or na"),
   language_category
-][3]
+][1]
 
 # Define the variable
 total_cohort[, lang_cat_3 := fcase(
@@ -793,69 +641,603 @@ total_cohort[, lang_cat_6 := fcase(
 
 ```
 
-# Total Cohort for Non-English Analysis
+# SEDATION PROJECT
+# Step 1: Total Cohort for Non-English & Spanish + Non-English Analysis
 ```{r}
 # Identify reference points for model
 total_cohort$language_category <- relevel(as.factor(total_cohort$language_category), ref = "english")
-#total_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(total_cohort$top_five_non_eng_non_spanish), ref = "english")
-#total_cohort$non_eng <- relevel(as.factor(total_cohort$non_eng), ref = "english")
-#total_cohort$three_language_cat <- relevel(as.factor(total_cohort$three_language_cat), ref = "english")
+total_cohort$lang_cat_1 <- relevel(as.factor(total_cohort$lang_cat_1), ref = "english")
+total_cohort$lang_cat_2 <- relevel(as.factor(total_cohort$lang_cat_2), ref = "english")
+total_cohort$lang_cat_3 <- relevel(as.factor(total_cohort$lang_cat_3), ref = "english")
+total_cohort$lang_cat_4 <- relevel(as.factor(total_cohort$lang_cat_4), ref = "english")
+total_cohort$lang_cat_5 <- relevel(as.factor(total_cohort$lang_cat_5), ref = "english")
+total_cohort$lang_cat_6 <- relevel(as.factor(total_cohort$lang_cat_6), ref = "english")
 total_cohort$sex_category <- relevel(as.factor(total_cohort$sex_category), ref = "male")
 total_cohort$race_category <- relevel(as.factor(total_cohort$race_category), ref = "white")
 total_cohort$ethnicity_category <- relevel(as.factor(total_cohort$ethnicity_category), ref = "non-hispanic")
-
+total_cohort$ethnicity_category_final <- relevel(as.factor(total_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+################################################################################
+# Eng v Non-Eng
+################################################################################
 #Descriptive Table One
-table1_english_v_nonenglish_cohort_csv <- make_table1_federated(
+table1_english_v_nonenglish_cohort_descriptive <- make_table1_federated(
   dt = total_cohort,
   cat_vars = cat_vars,
   cont_vars = cont_vars,
-  by = "non_eng",   
+  by = "lang_cat_1",   
   site_name = institution
 )
 
 fwrite(
-  table1_english_v_nonenglish_cohort_csv,
-  file.path(sedation_tables_dir, paste0(institution, "_table1_english_v_nonenglish_cohort_descriptive.csv"))
+  table1_english_v_nonenglish_cohort_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_total_cohort_lang_cat_1_descriptive.csv"))
 )
 
 #Comparison Table One
 table1_english_v_nonenglish_cohort_comparisons <- make_table1_comparisons(
   dt = total_cohort,
-  by = "non_eng",
+  by = "lang_cat_1",
+  reference_level = "english",
   cont_vars = cont_vars,
   cat_vars = cat_vars,
-  site_name = institution,
-  group_levels = c("english", "non_english")
-)
-
-fwrite(
-  table1_english_v_nonenglish_cohort_comparisons,
-  file.path(sedation_tables_dir, paste0(institution, "_table1_english_v_nonenglish_cohort_comparisons.csv"))
-)
-```
-
-# Cohort for Top 5 non-English, non-Spanish Language
-```{r}
-#top_five_cohort <- total_cohort[top_five_non_eng_non_spanish %in% c("english", "top_five_non_eng_non_spanish", "spanish")]
-#top_five_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(top_five_cohort$top_five_non_eng_non_spanish), ref = "english")
-#top_five_cohort$non_eng <- relevel(as.factor(top_five_cohort$non_eng), ref = "english")
-top_five_cohort$sex_category <- relevel(as.factor(top_five_cohort$sex_category), ref = "male")
-top_five_cohort$race_category <- relevel(as.factor(top_five_cohort$race_category), ref = "white")
-top_five_cohort$ethnicity_category <- relevel(as.factor(top_five_cohort$ethnicity_category), ref = "non-hispanic")
-
-#Basic Table One
-table1_top5_cohort_csv <- make_table1_federated(
-  dt = total_cohort,
-  cat_vars = cat_vars,
-  cont_vars = cont_vars,
-  by = "top_five_non_eng_non_spanish",   # or NULL if overall only
   site_name = institution
 )
 
 fwrite(
-  table1_total_cohort_csv,
-  file.path(sedation_tables_dir, paste0(institution, "_table1_federated.csv"))
+  table1_english_v_nonenglish_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_total_cohort_lang_cat_1_comparisons.csv"))
 )
+
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_1 <- lm(percent_deep_sedation_48 ~ lang_cat_1 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = total_cohort)
+
+summary(sensitivity_model_lang_cat_1)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_1_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_1)),
+  estimate = coef(sensitivity_model_lang_cat_1),
+  std.error = summary(sensitivity_model_lang_cat_1)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_1)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_1)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_1_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_1.csv")))
+################################################################################
+# Eng v Spanish v Other Non-Eng
+################################################################################
+#Descriptive Table One
+table1_english_v_spanish_v_nonenglish_cohort_descriptive <- make_table1_federated(
+  dt = total_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "lang_cat_2",   
+  site_name = institution
+)
+
+fwrite(
+  table1_english_v_spanish_v_nonenglish_cohort_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_total_cohort_lang_cat_2_descriptive.csv"))
+)
+
+#Comparison Table One
+table1_english_v_spanish_v_nonenglish_cohort_comparisons <- make_table1_comparisons(
+  dt = total_cohort,
+  by = "lang_cat_2",
+  reference_level = "english",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution
+)
+
+fwrite(
+  table1_english_v_spanish_v_nonenglish_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_total_cohort_lang_cat_2_comparisons.csv"))
+)
+
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_2 <- lm(percent_deep_sedation_48 ~ lang_cat_2 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = total_cohort)
+
+summary(sensitivity_model_lang_cat_2)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_2_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_2)),
+  estimate = coef(sensitivity_model_lang_cat_2),
+  std.error = summary(sensitivity_model_lang_cat_2)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_2)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_2)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_2_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_2.csv")))
+
+```
+
+# Step 2: English + Spanish + Most Frequent non-spanish/non-english
+```{r}
+lang_cat_3_cohort <- total_cohort[!is.na(lang_cat_3)]
+# Identify reference points for model
+lang_cat_3_cohort$language_category <- relevel(as.factor(lang_cat_3_cohort$language_category), ref = "english")
+lang_cat_3_cohort$lang_cat_1 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_1), ref = "english")
+lang_cat_3_cohort$lang_cat_2 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_2), ref = "english")
+lang_cat_3_cohort$lang_cat_3 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_3), ref = "english")
+lang_cat_3_cohort$lang_cat_4 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_4), ref = "english")
+lang_cat_3_cohort$lang_cat_5 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_5), ref = "english")
+lang_cat_3_cohort$lang_cat_6 <- relevel(as.factor(lang_cat_3_cohort$lang_cat_6), ref = "english")
+lang_cat_3_cohort$sex_category <- relevel(as.factor(lang_cat_3_cohort$sex_category), ref = "male")
+lang_cat_3_cohort$race_category <- relevel(as.factor(lang_cat_3_cohort$race_category), ref = "white")
+lang_cat_3_cohort$ethnicity_category <- relevel(as.factor(lang_cat_3_cohort$ethnicity_category), ref = "non-hispanic")
+lang_cat_3_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_3_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+################################################################################
+# Eng v Spanish v Top 3
+################################################################################
+#Descriptive Table One
+table1_english_v_spanish_v_3rd_cohort_descriptive <- make_table1_federated(
+  dt = lang_cat_3_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "lang_cat_3",   
+  site_name = institution
+)
+
+fwrite(
+  table1_english_v_spanish_v_3rd_cohort_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_3_descriptive.csv"))
+)
+
+#Comparison Table One
+table1_english_v_spanish_v_3rd_cohort_comparisons <- make_table1_comparisons(
+  dt = lang_cat_3_cohort,
+  by = "lang_cat_3",
+  reference_level = "english",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution
+)
+
+fwrite(
+  table1_english_v_spanish_v_3rd_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_3_comparisons.csv"))
+)
+
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_3 <- lm(percent_deep_sedation_48 ~ lang_cat_3 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = lang_cat_3_cohort)
+
+summary(sensitivity_model_lang_cat_3)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_3_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_3)),
+  estimate = coef(sensitivity_model_lang_cat_3),
+  std.error = summary(sensitivity_model_lang_cat_3)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_3)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_3)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_3_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_3.csv")))
+
+```
+
+# Step 3: Languages with the most evidence of disparities in the medical literature
+```{r}
+lang_cat_4_cohort <- total_cohort[!is.na(lang_cat_4)]
+# Identify reference points for model
+lang_cat_4_cohort$language_category <- relevel(as.factor(lang_cat_4_cohort$language_category), ref = "english")
+lang_cat_4_cohort$lang_cat_1 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_1), ref = "english")
+lang_cat_4_cohort$lang_cat_2 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_2), ref = "english")
+lang_cat_4_cohort$lang_cat_3 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_3), ref = "english")
+lang_cat_4_cohort$lang_cat_4 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_4), ref = "english")
+lang_cat_4_cohort$lang_cat_5 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_5), ref = "english")
+lang_cat_4_cohort$lang_cat_6 <- relevel(as.factor(lang_cat_4_cohort$lang_cat_6), ref = "english")
+lang_cat_4_cohort$sex_category <- relevel(as.factor(lang_cat_4_cohort$sex_category), ref = "male")
+lang_cat_4_cohort$race_category <- relevel(as.factor(lang_cat_4_cohort$race_category), ref = "white")
+lang_cat_4_cohort$ethnicity_category <- relevel(as.factor(lang_cat_4_cohort$ethnicity_category), ref = "non-hispanic")
+lang_cat_4_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_4_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+################################################################################
+# Eng v Spanish v Chinese v Vietnamese
+################################################################################
+# Descriptive Table One
+table1_lang_cat_4_descriptive <- make_table1_federated(
+  dt = lang_cat_4_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "lang_cat_4",   
+  site_name = institution
+)
+
+fwrite(
+  table1_lang_cat_4_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_4_descriptive.csv"))
+)
+
+#Comparison Table One
+table1_lang_cat_4_cohort_comparisons <- make_table1_comparisons(
+  dt = lang_cat_4_cohort,
+  by = "lang_cat_4",
+  reference_level = "english",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution
+)
+
+fwrite(
+  table1_lang_cat_4_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_4_comparisons.csv"))
+)
+
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_4 <- lm(percent_deep_sedation_48 ~ lang_cat_4 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = lang_cat_4_cohort)
+
+summary(sensitivity_model_lang_cat_4)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_4_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_4)),
+  estimate = coef(sensitivity_model_lang_cat_4),
+  std.error = summary(sensitivity_model_lang_cat_4)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_4)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_4)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_4_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_4.csv")))
+
+```
+
+# Step 4: Languages with the most evidence of disparities in the medical literature
+```{r}
+lang_cat_5_cohort <- total_cohort[!is.na(lang_cat_5)]
+# Identify reference points for model
+lang_cat_5_cohort$language_category <- relevel(as.factor(lang_cat_5_cohort$language_category), ref = "english")
+lang_cat_5_cohort$lang_cat_1 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_1), ref = "english")
+lang_cat_5_cohort$lang_cat_2 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_2), ref = "english")
+lang_cat_5_cohort$lang_cat_3 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_3), ref = "english")
+lang_cat_5_cohort$lang_cat_4 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_4), ref = "english")
+lang_cat_5_cohort$lang_cat_5 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_5), ref = "english")
+lang_cat_5_cohort$lang_cat_6 <- relevel(as.factor(lang_cat_5_cohort$lang_cat_6), ref = "english")
+lang_cat_5_cohort$sex_category <- relevel(as.factor(lang_cat_5_cohort$sex_category), ref = "male")
+lang_cat_5_cohort$race_category <- relevel(as.factor(lang_cat_5_cohort$race_category), ref = "white")
+lang_cat_5_cohort$ethnicity_category <- relevel(as.factor(lang_cat_5_cohort$ethnicity_category), ref = "non-hispanic")
+lang_cat_5_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_5_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+################################################################################
+# Eng v Spanish v broad regional groupings
+################################################################################
+# Descriptive Table One
+table1_lang_cat_5_descriptive <- make_table1_federated(
+  dt = lang_cat_5_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "lang_cat_5",   
+  site_name = institution
+)
+
+fwrite(
+  table1_lang_cat_5_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_5_descriptive.csv"))
+)
+
+#Comparison Table One
+table1_lang_cat_5_cohort_comparisons <- make_table1_comparisons(
+  dt = lang_cat_5_cohort,
+  by = "lang_cat_5",
+  reference_level = "english",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution
+)
+
+fwrite(
+  table1_lang_cat_5_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_cohort_lang_cat_5_comparisons.csv"))
+)
+
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_5 <- lm(percent_deep_sedation_48 ~ lang_cat_5 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = lang_cat_5_cohort)
+
+summary(sensitivity_model_lang_cat_5)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_5_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_5)),
+  estimate = coef(sensitivity_model_lang_cat_5),
+  std.error = summary(sensitivity_model_lang_cat_5)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_5)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_5)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_5_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_5.csv")))
+
+```
+
+# Step 5: Defining the primary cohort, primary analysis, secondary analyses, sensitivity analyses
+```{r}
+primary_cohort <- total_cohort[!is.na(lang_cat_6)]
+# Identify reference points for model
+primary_cohort$language_category <- relevel(as.factor(primary_cohort$language_category), ref = "english")
+primary_cohort$lang_cat_1 <- relevel(as.factor(primary_cohort$lang_cat_1), ref = "english")
+primary_cohort$lang_cat_2 <- relevel(as.factor(primary_cohort$lang_cat_2), ref = "english")
+primary_cohort$lang_cat_3 <- relevel(as.factor(primary_cohort$lang_cat_3), ref = "english")
+primary_cohort$lang_cat_4 <- relevel(as.factor(primary_cohort$lang_cat_4), ref = "english")
+primary_cohort$lang_cat_5 <- relevel(as.factor(primary_cohort$lang_cat_5), ref = "english")
+primary_cohort$lang_cat_6 <- relevel(as.factor(primary_cohort$lang_cat_6), ref = "english")
+primary_cohort$sex_category <- relevel(as.factor(primary_cohort$sex_category), ref = "male")
+primary_cohort$race_category <- relevel(as.factor(primary_cohort$race_category), ref = "white")
+primary_cohort$ethnicity_category <- relevel(as.factor(primary_cohort$ethnicity_category), ref = "non-hispanic")
+primary_cohort$ethnicity_category_final <- relevel(as.factor(primary_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+################################################################################
+# Primary Cohort - Table 1s
+################################################################################
+# Descriptive Table One
+primary_cohort_descriptive <- make_table1_federated(
+  dt = primary_cohort,
+  cat_vars = cat_vars,
+  cont_vars = cont_vars,
+  by = "lang_cat_6",   
+  site_name = institution
+)
+
+fwrite(
+  primary_cohort_descriptive,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_primary_cohort_descriptive.csv"))
+)
+
+#Comparison Table One
+primary_cohort_comparisons <- make_table1_comparisons(
+  dt = primary_cohort,
+  by = "lang_cat_6",
+  reference_level = "english",
+  cont_vars = cont_vars,
+  cat_vars = cat_vars,
+  site_name = institution
+)
+
+fwrite(
+  primary_cohort_comparisons,
+  file.path(sedation_tables_dir, paste0(institution, "_table1_primary_cohort_comparisons.csv"))
+)
+################################################################################
+# Primary Cohort - Primary Analysis - Unadjusted and Adjusted
+################################################################################
+# Fit the unadjusted primary model
+primary_model_unadjusted <- lm(percent_deep_sedation_48 ~ lang_cat_6, data = primary_cohort)
+
+summary(primary_model_unadjusted)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+primary_model_unadjusted_results <- data.frame(
+  term = names(coef(primary_model_unadjusted)),
+  estimate = coef(primary_model_unadjusted),
+  std.error = summary(primary_model_unadjusted)$coefficients[, "Std. Error"],
+  variance = (summary(primary_model_unadjusted)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(primary_model_unadjusted)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+
+# Save the results to a file
+fwrite(primary_model_unadjusted_results, file.path(sedation_final_data, paste0(institution, "_primary_model_unadjusted.csv")))
+
+# Fit the adjusted primary model
+primary_model_adjusted <- lm(percent_deep_sedation_48 ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = primary_cohort)
+summary(primary_model_adjusted)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+primary_model_adjusted_results <- data.frame(
+  term = names(coef(primary_model_adjusted)),
+  estimate = coef(primary_model_adjusted),
+  std.error = summary(primary_model_adjusted)$coefficients[, "Std. Error"],
+  variance = (summary(primary_model_adjusted)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(primary_model_adjusted)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+
+# Save the results to a file
+fwrite(primary_model_adjusted_results, file.path(sedation_final_data, paste0(institution, "_primary_model_adjusted.csv")))
+
+################################################################################
+# Primary Cohort - Secondary Analyses
+################################################################################
+# VFDs
+secondary_model_vfd <- lm(vent_free_days_28 ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = primary_cohort)
+
+summary(secondary_model_vfd)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+secondary_model_vfd_results <- data.frame(
+  term = names(coef(secondary_model_vfd)),
+  estimate = coef(secondary_model_vfd),
+  std.error = summary(secondary_model_vfd)$coefficients[, "Std. Error"],
+  variance = (summary(secondary_model_vfd)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(secondary_model_vfd)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(secondary_model_vfd_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_vfd.csv")))
+
+####################
+# IMV Time
+secondary_model_imv_time <- lm(imv_duration_hours_final ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = primary_cohort)
+
+summary(secondary_model_imv_time)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+secondary_model_imv_time_results <- data.frame(
+  term = names(coef(secondary_model_imv_time)),
+  estimate = coef(secondary_model_imv_time),
+  std.error = summary(secondary_model_imv_time)$coefficients[, "Std. Error"],
+  variance = (summary(secondary_model_imv_time)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(secondary_model_imv_time)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(secondary_model_imv_time_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_imv_time.csv")))
+
+########################
+# Tracheostomy Odds
+secondary_model_trach <- glm(trached ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year), data = primary_cohort, 
+                                  family = binomial(link = "logit"))
+
+summary(secondary_model_trach)
+
+# Extract coefficients and calculate odds ratios, standard errors, and variance
+coef_summary_trach <- summary(secondary_model_trach)$coefficients
+odds_ratios <- exp(coef_summary_trach[, "Estimate"])  # Exponentiated coefficients
+standard_errors <- coef_summary_trach[, "Std. Error"]
+variance <- standard_errors^2  # Calculate variance
+p_values <- coef_summary_trach[, "Pr(>|z|)"]  # Extract p-values
+
+# Create a data frame to hold the results
+secondary_model_trach_results <- data.frame(
+    Variable = rownames(coef_summary_trach),
+    Odds_Ratio = odds_ratios,
+    Std_Error = standard_errors,
+    Variance = variance,  # Add variance
+    P_Value = p_values    # Add p-values
+)
+secondary_model_trach_results
+
+# Write the results to a CSV file
+fwrite(secondary_model_trach_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_trach.csv")))
+
+############################
+# 6-Month Hospital Free Days
+secondary_model_6mhfd <- lm(hospital_free_days_6mo ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = primary_cohort)
+
+summary(secondary_model_6mhfd)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+secondary_model_6mhfd_results <- data.frame(
+  term = names(coef(secondary_model_6mhfd)),
+  estimate = coef(secondary_model_6mhfd),
+  std.error = summary(secondary_model_6mhfd)$coefficients[, "Std. Error"],
+  variance = (summary(secondary_model_6mhfd)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(secondary_model_6mhfd)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(secondary_model_6mhfd_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_6mhfd.csv")))
+
+#############################
+# 28-Day Mortality
+secondary_model_28day_mortality <- glm(mortality_28day ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year), data = primary_cohort, 
+                                  family = binomial(link = "logit"))
+
+summary(secondary_model_28day_mortality)
+
+# Extract coefficients and calculate odds ratios, standard errors, and variance
+coef_summary_30dm <- summary(secondary_model_28day_mortality)$coefficients
+odds_ratios <- exp(coef_summary_30dm[, "Estimate"])  # Exponentiated coefficients
+standard_errors <- coef_summary_30dm[, "Std. Error"]
+variance <- standard_errors^2  # Calculate variance
+p_values <- coef_summary_30dm[, "Pr(>|z|)"]  # Extract p-values
+
+# Create a data frame to hold the results
+secondary_model_30day_mortality_results <- data.frame(
+    Variable = rownames(coef_summary_30dm),
+    Odds_Ratio = odds_ratios,
+    Std_Error = standard_errors,
+    Variance = variance,  # Add variance
+    P_Value = p_values    # Add p-values
+)
+secondary_model_30day_mortality_results
+
+# Write the results to a CSV file
+fwrite(secondary_model_30day_mortality_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_28_day_mortality.csv")))
+
+##############################
+# Reintubation Odds
+secondary_model_reintubation <- glm(reintubation_final ~ lang_cat_6 + race_category + age_category + sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year), data = primary_cohort, 
+                                  family = binomial(link = "logit"))
+
+summary(secondary_model_reintubation)
+
+# Extract coefficients and calculate odds ratios, standard errors, and variance
+coef_summary_reintubation <- summary(secondary_model_reintubation)$coefficients
+odds_ratios <- exp(coef_summary_reintubation[, "Estimate"])  # Exponentiated coefficients
+standard_errors <- coef_summary_reintubation[, "Std. Error"]
+variance <- standard_errors^2  # Calculate variance
+p_values <- coef_summary_reintubation[, "Pr(>|z|)"]  # Extract p-values
+
+# Create a data frame to hold the results
+secondary_model_reintubation_results <- data.frame(
+    Variable = rownames(coef_summary_reintubation),
+    Odds_Ratio = odds_ratios,
+    Std_Error = standard_errors,
+    Variance = variance,  # Add variance
+    P_Value = p_values    # Add p-values
+)
+secondary_model_reintubation_results
+
+# Write the results to a CSV file
+fwrite(secondary_model_reintubation_results, file.path(sedation_secondary, paste0(institution, "_secondary_analysis_reintubation.csv")))
+
+#####################################
+# In Hospital Mortality
+
+
+
+
+
+#####################################
+# 28-Day Hospital Free Days
+
+
+
+
+#####################################
+# 28-Day ICU Free Days
+
+
+
+
+#####################################
+# 28-Day Vent Free Days Alt
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################################################################
+# Sedation Sensitivity Analysis - Eng v Non-Eng
+sensitivity_model_lang_cat_5 <- lm(percent_deep_sedation_48 ~ lang_cat_5 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
+               data = lang_cat_5_cohort)
+
+summary(sensitivity_model_lang_cat_5)
+
+# Extract coefficients, standard errors, variance, and p-values for the adjusted model
+sensitivity_model_lang_cat_5_results <- data.frame(
+  term = names(coef(sensitivity_model_lang_cat_5)),
+  estimate = coef(sensitivity_model_lang_cat_5),
+  std.error = summary(sensitivity_model_lang_cat_5)$coefficients[, "Std. Error"],
+  variance = (summary(sensitivity_model_lang_cat_5)$coefficients[, "Std. Error"])^2,  # Calculate variance
+  p.value = summary(sensitivity_model_lang_cat_5)$coefficients[, "Pr(>|t|)"]  # Extract p-values
+)
+
+# Save the results to a file
+fwrite(sensitivity_model_lang_cat_5_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_lang_cat_5.csv")))
+
+
+
 ```
 
 # Cohort for Sensitivity Analysis Involving All Spanish/English Pts regardless of ICU of admission
@@ -1009,50 +1391,6 @@ fwrite(primary_results_combined, file.path(final_data, paste0(institution, "_pri
 ```
 
 
-#STEP FOUR: SECONDARY ANALYSES
-#Secondary Analysis: Total time mechnically ventilated
-```{r}
-secondary_model_imv_time <- lm(imv_duration_hours_final ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
-               data = english_spanish_primary_analysis)
-
-summary(secondary_model_imv_time)
-
-# Extract coefficients, standard errors, variance, and p-values for the adjusted model
-secondary_model_imv_time_results <- data.frame(
-  term = names(coef(secondary_model_imv_time)),
-  estimate = coef(secondary_model_imv_time),
-  std.error = summary(secondary_model_imv_time)$coefficients[, "Std. Error"],
-  variance = (summary(secondary_model_imv_time)$coefficients[, "Std. Error"])^2,  # Calculate variance
-  p.value = summary(secondary_model_imv_time)$coefficients[, "Pr(>|t|)"]  # Extract p-values
-)
-
-# Save the results to a file
-fwrite(secondary_model_imv_time_results, file.path(final_data, paste0(institution, "_secondary_analysis_imv_time.csv")))
-
-```
-
-
-#Secondary Analysis: 28-Day Ventilator-Free-Days
-```{r}
-
-secondary_model_vfd <- lm(vent_free_days_28 ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
-               data = english_spanish_primary_analysis)
-
-summary(secondary_model_vfd)
-
-# Extract coefficients, standard errors, variance, and p-values for the adjusted model
-secondary_model_vfd_results <- data.frame(
-  term = names(coef(secondary_model_vfd)),
-  estimate = coef(secondary_model_vfd),
-  std.error = summary(secondary_model_vfd)$coefficients[, "Std. Error"],
-  variance = (summary(secondary_model_vfd)$coefficients[, "Std. Error"])^2,  # Calculate variance
-  p.value = summary(secondary_model_vfd)$coefficients[, "Pr(>|t|)"]  # Extract p-values
-)
-
-# Save the results to a file
-fwrite(secondary_model_vfd_results, file.path(final_data, paste0(institution, "_secondary_analysis_vfd.csv")))
-
-```
 
 
 #Secondary Analysis: 28-Day Mortality
@@ -1115,35 +1453,6 @@ fwrite(secondary_model_inhospital_mortality_results, file.path(final_data, paste
 
 ```
 
-
-#Secondary Analysis: Tracheostomy Odds
-```{r}
-secondary_model_trach <- glm(trached ~ language_category + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2, data = english_spanish_primary_analysis, 
-                                  family = binomial(link = "logit"))
-
-summary(secondary_model_trach)
-
-# Extract coefficients and calculate odds ratios, standard errors, and variance
-coef_summary_trach <- summary(secondary_model_trach)$coefficients
-odds_ratios <- exp(coef_summary_trach[, "Estimate"])  # Exponentiated coefficients
-standard_errors <- coef_summary_trach[, "Std. Error"]
-variance <- standard_errors^2  # Calculate variance
-p_values <- coef_summary_trach[, "Pr(>|z|)"]  # Extract p-values
-
-# Create a data frame to hold the results
-secondary_model_trach_results <- data.frame(
-    Variable = rownames(coef_summary_trach),
-    Odds_Ratio = odds_ratios,
-    Std_Error = standard_errors,
-    Variance = variance,  # Add variance
-    P_Value = p_values    # Add p-values
-)
-secondary_model_trach_results
-
-# Write the results to a CSV file
-fwrite(secondary_model_trach_results, file.path(final_data, paste0(institution, "_secondary_analysis_trach.csv")))
-
-```
 
 
 #Secondary Analysis: Reintubation Odds
