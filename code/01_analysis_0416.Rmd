@@ -48,11 +48,11 @@ local_dir <- config$local_dir
 output_dir <- file.path(local_dir, "output/")
 intermediate_dir <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
 final_data_dir <- file.path(output_dir, "FINAL_DATA_UPLOAD_ME/")
-cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics")
-sedation_project <- file.path(final_data_dir, "sedation_project")
+cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics/")
+sedation_project <- file.path(final_data_dir, "sedation_project/")
 sedation_tables_dir <- file.path(sedation_project, "final_tables/")
 sedation_final_data <- file.path(sedation_project, "final_data/")
-paralytics_project <- file.path(final_data_dir, "paralytics_project")
+paralytics_project <- file.path(final_data_dir, "paralytics_project/")
 paralytics_tables_dir <- file.path(sedation_project, "final_tables/")  
 paralytics_final_data <- file.path(sedation_project, "final_data/")
 file_type <- config$file_type
@@ -69,31 +69,13 @@ for (dir in dirs_to_create) {
 
 #Upload Data
 ```{r}
-read_data <- function(file_path, select = NULL) {
-  if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
-    # Use fread with the select argument for CSV and CSV.GZ files
-    return(fread(file_path, select = all_of(select)))
-  } else if (grepl("\\.parquet$", file_path)) {
-    # Use read_parquet with col_select for Parquet files
-    return(arrow::read_parquet(file_path, col_select = all_of(select)))
-  } else if (grepl("\\.fst$", file_path)) {
-    # Use read_fst with columns for FST files
-    return(fst::read_fst(file_path, columns = all_of(select)))
-  } else {
-    stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
-  }
-}
-
 # Upload Analytic File
 total_cohort <- read_parquet(paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
+setDT(total_cohort)
 
-#total_cohort$icu_imv <- factor(
-#  total_cohort$icu_imv,
-#  levels = c("cardiac_icu", "general_icu", "medical_icu", 
-#             "mixed_cardiothoracic_icu", "mixed_neuro_icu", "neuro_icu", "neurosurgical_icu", "surgical_icu", "trauma_icu", #"burn_icu", "cardiothoracic_surgical_icu"),
-#  labels = c("Cardiac ICU", "General ICU", "Medical ICU", 
-#             "Mixed Cardiothoracic ICU", "Mixed Neuro ICU", "Neuro ICU", "Neurosurgical ICU", "Surgical ICU", "Trauma ICU", "Burn #ICU", "Cardiothoracic Surgical ICU")
-#)
+# Upload hospital system language information
+language_data <- fread(paste0(cohort_characteristics, institution, "_hospital_system_language_counts", ".csv"))
+setDT(language_data)
 
 cat_vars <- c("sex_category", "ethnicity_category", "race_category", "hospital_id", "icu_imv", "location_of_intubation", "admission_type_category", "arf_flag", "arHf_flag")
 
@@ -249,9 +231,7 @@ make_table1_federated <- function(dt,
   return(out[])
 }
 
-#Table 1: Comparative
 # Table 1: Comparative
-library(data.table)
 
 make_table1_comparisons <- function(dt,
                                     by,
@@ -685,12 +665,132 @@ ipw_outcome <- total_cohort[, .(
 ipw_sensitivity_analysis <- merge(total_cohort, ipw_outcome, by = "hospitalization_id")
 
 # Use patient-level covariates to predict censoring
-ipw_model <- glm(reached_48h ~ age_category + sex_category + race_category + ethnicity_category + laps2 + factor(hospital_icu_id) + elixhauser_score + factor(observation_year),
+ipw_model <- glm(reached_48h ~ age_at_admission + sex_category + race_category + ethnicity_category + laps2 + factor(hospital_icu_id) + elixhauser_score + factor(observation_year),
                  data = unique(ipw_sensitivity_analysis, by = "hospitalization_id"),
                  family = binomial())
 
 total_cohort[, prob_reach_48h := predict(ipw_model, newdata = total_cohort, type = "response")]
 total_cohort[, ipw := 1 / prob_reach_48h]
+```
+
+# Build Language Categorizations
+```{r}
+# 1: English v Non-English
+total_cohort[, lang_cat_1 := fifelse(
+  language_category == "english", "english",
+  fifelse(!is.na(language_category), "non-english", NA_character_)
+)]
+
+# 2: English v Spanish v all other non-English
+total_cohort[, lang_cat_2 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  !is.na(language_category), "other non-english",
+  default = NA_character_
+)]
+
+# 3: English v Spanish v third most frequent hospital system wide language - all others NA
+# Define third_lang
+# Skip "Unknown or NA" if it appears in the 3rd position
+third_lang <- language_data[
+  !tolower(language_category) %in% c("unknown or na"),
+  language_category
+][3]
+
+# Define the variable
+total_cohort[, lang_cat_3 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category == third_lang, third_lang,
+  default = NA_character_
+)]
+
+# 4: English v Spanish v Chinese v Vietnamese (three non-English languages with the most evidence supporting the existence of health disparities) - all others NA
+total_cohort[, lang_cat_4 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category == "chinese", "chinese",
+  language_category == "vietnamese", "vietnamese",
+  default = NA_character_
+)]
+
+# 5: English v Spanish v Broad Regional Groupings
+# South Asian, East Asian, Southeast Asian, Sub-Saharan African, non-colonial European
+# Others that do not fit are NA
+
+# -----------------------------
+# Define language groupings
+# -----------------------------
+
+south_asian_langs <- c(
+  "gujarati",
+  "hindi",
+  "urdu",
+  "punjabi",
+  "bengali",
+  "nepali, marathi, or other indic languages",
+  "telugu",
+  "tamil",
+  "malayalam, kannada, or other dravidian languages"
+)
+
+east_asian_langs <- c(
+  "chinese",
+  "japanese",
+  "korean"
+)
+
+southeast_asian_langs <- c(
+  "vietnamese",
+  "khmer",
+  "thai, lao, or other tai-kadai languages"
+)
+
+sub_saharan_african_langs <- c(
+  "amharic, somali, or other afro-asiatic languages",
+  "yoruba, twi, igbo, or other languages of western africa",
+  "swahili or other languages of central, eastern, and southern africa"
+)
+
+non_colonial_european_langs <- c(
+  "german",
+  "greek",
+  "russian",
+  "polish",
+  "italian",
+  "serbo-croatian",
+  "ukrainian or other slavic languages",
+  "yiddish, pennsylvania dutch, or other west germanic languages",
+  "other european indo-european languages")
+  
+mena_langs <- c(
+  "arabic",
+  "persian",
+  "hebrew"
+)
+
+total_cohort[, lang_cat_5 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category == "french", "french",
+  language_category == "portugese", "portugese",
+  language_category %in% south_asian_langs, "south_asian",
+  language_category %in% east_asian_langs, "east_asian",
+  language_category %in% southeast_asian_langs, "southeast_asian",
+  language_category %in% sub_saharan_african_langs, "sub_saharan_african",
+  language_category %in% non_colonial_european_langs, "non_colonial_european",
+  language_category %in% mena_langs, "mena",
+  default = NA_character_
+)]
+
+# 6: English v Spanish - all others NA
+total_cohort[, lang_cat_6 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  default = NA_character_
+)]
+
+
 ```
 
 # Total Cohort for Non-English Analysis
