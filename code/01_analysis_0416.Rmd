@@ -697,9 +697,9 @@ total_cohort[, ipw := 1 / prob_reach_48h]
 ```{r}
 # Identify reference points for model
 total_cohort$language_category <- relevel(as.factor(total_cohort$language_category), ref = "english")
-total_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(total_cohort$top_five_non_eng_non_spanish), ref = "english")
-total_cohort$non_eng <- relevel(as.factor(total_cohort$non_eng), ref = "english")
-total_cohort$three_language_cat <- relevel(as.factor(total_cohort$three_language_cat), ref = "english")
+#total_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(total_cohort$top_five_non_eng_non_spanish), ref = "english")
+#total_cohort$non_eng <- relevel(as.factor(total_cohort$non_eng), ref = "english")
+#total_cohort$three_language_cat <- relevel(as.factor(total_cohort$three_language_cat), ref = "english")
 total_cohort$sex_category <- relevel(as.factor(total_cohort$sex_category), ref = "male")
 total_cohort$race_category <- relevel(as.factor(total_cohort$race_category), ref = "white")
 total_cohort$ethnicity_category <- relevel(as.factor(total_cohort$ethnicity_category), ref = "non-hispanic")
@@ -736,9 +736,9 @@ fwrite(
 
 # Cohort for Top 5 non-English, non-Spanish Language
 ```{r}
-top_five_cohort <- total_cohort[top_five_non_eng_non_spanish %in% c("english", "top_five_non_eng_non_spanish", "spanish")]
-top_five_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(top_five_cohort$top_five_non_eng_non_spanish), ref = "english")
-top_five_cohort$non_eng <- relevel(as.factor(top_five_cohort$non_eng), ref = "english")
+#top_five_cohort <- total_cohort[top_five_non_eng_non_spanish %in% c("english", "top_five_non_eng_non_spanish", "spanish")]
+#top_five_cohort$top_five_non_eng_non_spanish <- relevel(as.factor(top_five_cohort$top_five_non_eng_non_spanish), ref = "english")
+#top_five_cohort$non_eng <- relevel(as.factor(top_five_cohort$non_eng), ref = "english")
 top_five_cohort$sex_category <- relevel(as.factor(top_five_cohort$sex_category), ref = "male")
 top_five_cohort$race_category <- relevel(as.factor(top_five_cohort$race_category), ref = "white")
 top_five_cohort$ethnicity_category <- relevel(as.factor(top_five_cohort$ethnicity_category), ref = "non-hispanic")
@@ -1219,4 +1219,32 @@ ggplot(dt_lang, aes(x = Odds_Ratio, y = reorder(language_label, Odds_Ratio))) +
   ) +
   theme_minimal()
   
+```{r}
+library(data.table)
+library(ggplot2)
+
+dt_plot <- total_cohort[
+  icu_imv != "mixed_neuro_icu" &
+  imv_duration_hours_final >= 24
+]
+
+ggplot(dt_plot, aes(x = vent_free_days_28)) +
+  geom_histogram(binwidth = 1, boundary = 0, closed = "left") +
+  labs(
+    title = "Distribution of Ventilator-Free Days (28-day)",
+    x = "Ventilator-Free Days",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+ggplot(dt_plot, aes(x = vent_free_days_28_alt)) +
+  geom_histogram(binwidth = 1, boundary = -1, closed = "left") +
+  labs(
+    title = "Distribution of Ventilator-Free Days (28-day, Death = -1)",
+    x = "Ventilator-Free Days (Alt)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
   

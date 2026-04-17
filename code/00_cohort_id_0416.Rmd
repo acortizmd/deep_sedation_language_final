@@ -481,16 +481,13 @@ patient_demographics[, race_category := tolower(race_category)]
 patient_demographics[, ethnicity_category := tolower(ethnicity_category)]
 
 # Cohort Wide Language Counts
-language_counts_hospital_system <- patient_demographics[
-  !language_category %in% c(""), 
-  .N, 
-  by = language_category
-][
-  , percent := 100 * N / sum(N)
-][
-  order(-N)
-]
-fwrite(language_counts_hospital_system, file.path(cohort_characteristics, paste0(institution, "_hospital_system_language_counts.csv")))
+language_counts_hospital_system <- patient_demographics[!language_category %in% c(""), 
+  .N, by = language_category][, percent := 100 * N / sum(N)][
+  , `:=`(
+    N_display = fifelse(N < 10, "less than 10", as.character(N)),
+    percent_display = fifelse(N < 10, "less than 10", sprintf("%.1f", percent))
+  )][order(-N)]
+fwrite(language_counts_hospital_system[, .(language_category, N = N_display, percent = percent_display)],  file.path(cohort_characteristics, paste0(institution, "_hospital_system_language_counts.csv")))
 
 #ADT
 adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
@@ -519,7 +516,8 @@ setnames(labs_time_dependent, "lab_collect_dttm", "recorded_dttm")
 
 #Continuous Meds
 specific_med_groups <- c("vasoactives", "sedation", "paralytics", "analgesia", "paralytic")
-meds <- as.data.table(read_data(paste0(data_dir,"clif_medication_admin_continuous", file_type), select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category")))[med_group %in% specific_med_groups]
+meds <- as.data.table(read_data(paste0(data_dir,"clif_medication_admin_continuous", file_type), select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category", "mar_action_category", "mar_action_group")))[med_group %in% specific_med_groups]
+setorder(meds, hospitalization_id, admin_dttm)
 
 #Intermittent Meds
 intermittent_med_groups <- c("paralytic", "paralytics", "sedation", "analgesia")
@@ -696,7 +694,6 @@ respiratory_support_imv[, explicit_non_imv :=
 
 # Identify IMV Runs
 imv_runs <- respiratory_support_imv[, {
-  
   n <- .N
   run_list <- list()
   
@@ -808,13 +805,11 @@ imv_runs[, reintubation :=
 
 # Determine Tracheostomy Data
 ###############################################################################
-# Identify hospitalization_ids that have tracheostomy at some point during 
-# their hospitalization and earliest timestamp within that hospitalization
+# Identify hospitalization_ids that have tracheostomy at some point during their hospitalization and earliest timestamp within that hospitalization
 trach_resp <- respiratory_support[tracheostomy == "1"]
 trach_dttm_table <- trach_resp[, .(trach_dttm = min(recorded_dttm, na.rm = TRUE)), by = hospitalization_id]
 
-# Identify hospitalization_ids that have "trach collar" device at any point in hospitalization
-# and corresponding earliest timestamp within that hospitalization
+# Identify hospitalization_ids that have "trach collar" device at any point in hospitalization and corresponding earliest timestamp within that hospitalization
 trach_collar_resp <- respiratory_support[device_category == "trach collar"]
 trach_collar_dttm_table <- trach_collar_resp[, .(trach_collar_dttm = min(recorded_dttm, na.rm = TRUE)), by = hospitalization_id]
 
@@ -906,12 +901,9 @@ all_hosp_w_trach_times <- merge(
   by = "adm_row_id",
   all.x = TRUE
 )
-
-# Drop helper column if desired
 all_hosp_w_trach_times[, adm_row_id := NULL]
 
-# Since we now have trach timing information for all hospitalizations for patients with any trach history,
-# filter only for those with known IMV run times
+# Since we now have trach timing information for all hospitalizations for patients with any trach history, filter only for those with known IMV run times
 imv_pts_w_trach <- all_hosp_w_trach_times[
   hospitalization_id %in% imv_runs$hospitalization_id
 ]
@@ -984,10 +976,8 @@ full_trach_table_filt[, ventilated_at_discharge := ifelse(
 full_trach_table_filt[, missed_trach :=
   ifelse(
     ventilated_at_discharge == TRUE &
-      !(discharge_category %in% c("Expired", "Other", "Acute Care Hospital", "Hospice")),
-    TRUE, FALSE
-  )
-]
+      !(discharge_category %in% c("expired", "other", "acute care hospital", "hospice")),
+    TRUE, FALSE)]
 
 # Put together trach IMV runs combining trach information and reintubation information
 trach_imv_runs <- merge(
@@ -1104,7 +1094,7 @@ imv_runs[, first_run_begin_imv := NULL]
 setorder(imv_runs, hospitalization_id, run_id)
 ###############################################################################
 # Remove false reintubations (trached patients going on and off settings) &
-# Remove additional imv_runs for patients trached at admission (not real)
+# Remove additional imv_runs for patients trached at admission (not real) - keeping one for future data cleaning auditing
 
 # Identify hospitalizations where a later run looks like a false reintubation
 imv_runs[, false_reintubation_hosp :=
@@ -1114,18 +1104,14 @@ imv_runs[, false_reintubation_hosp :=
 
 # Create temporary cleaned version for counting IMV episodes
 imv_runs_clean <- imv_runs[
-  !(
-    (trached_at_admission == TRUE | false_reintubation_hosp == TRUE) &
-    run_id > 1
-  )
-]
+  !((trached_at_admission == TRUE | false_reintubation_hosp == TRUE) &
+    run_id > 1)]
 
 ##############################################################################
 # Create reintubation_final at hospitalization level and propagate to all rows
 imv_runs_clean[, reintubation_final :=
   as.integer(any(reintubation_real == 1, na.rm = TRUE)),
-  by = hospitalization_id
-]
+  by = hospitalization_id]
 
 # Calculate IMV duration (hours), truncating at trach if it occurs during the run
 imv_runs_clean[, imv_duration_hours_final :=
@@ -1138,37 +1124,30 @@ imv_runs_clean[, imv_duration_hours_final :=
       end_imv
     ),
     begin_imv,
-    units = "hours"
-  ))
-]
+    units = "hours"))]
 
-#Narrow down columns
+# Narrow down columns
 imv_runs_clean <- imv_runs_clean[, .(hospitalization_id, run_id, begin_imv,
   end_imv, imv_duration_hours_final, trached, reintubation_final,
   trached_at_admission)]
 
 ##############################################################################
-#Use ADT to determine first location, procedural intubations
+# Use ADT to determine first location, procedural intubations
 adt_imv <- adt[hospitalization_id %in% imv_runs_clean$hospitalization_id]
 setorder(adt_imv, hospitalization_id, in_dttm)
 
-#First Location
+# First Location
 first_location_table <- adt_imv[
   ,
-  {
-    # overall first location
+  {# overall first location
     idx_all <- which(!is.na(location_category))[1]
-    
     # first ICU location
-    idx_icu <- which(location_category == "icu")[1]
-    
     .(
       first_location_category = if (is.na(idx_all)) NA_character_ else location_category[idx_all],
       first_location_dttm     = if (is.na(idx_all)) as.POSIXct(NA) else in_dttm[idx_all]
     )
   },
-  by = hospitalization_id
-]
+  by = hospitalization_id]
 
 # Find the location_of_intubation
 # 1) Direct match: begin_imv occurs inside ADT row
@@ -1186,13 +1165,10 @@ location_in_window <- adt_imv[
     run_id = i.run_id,
     begin_imv = i.begin_imv,
     location_of_intubation = location_category,
-    location_source = "matched_adt_interval"
-  )
-]
+    location_source = "matched_adt_interval")]
 
 # 2) First ADT row per hospitalization
-first_adt <- adt_imv[
-  order(hospitalization_id, in_dttm, out_dttm)
+first_adt <- adt_imv[order(hospitalization_id, in_dttm, out_dttm)
 ][
   , .SD[1], by = hospitalization_id
 ][
@@ -1355,8 +1331,8 @@ location_of_intubation_final <- unique(
   location_of_intubation_final,
   by = c("hospitalization_id", "run_id")
 )
-# -----------------------------------------------------------------------------
 
+# Now ID procedural only IMV runs
 # Find all ADT rows overlapping each IMV run
 imv_int <- copy(imv_runs_clean)[
   , `:=`(imv_start = begin_imv, imv_end = end_imv)
@@ -1716,52 +1692,23 @@ imv_runs_final <- merge(imv_runs_final, patient_bmi_data_final, by = "hospitaliz
 hospitalization_table_part_five <- hospitalization[hospitalization_id %in% imv_runs_final$hospitalization_id]
 patient_language <- patient_demographics[patient_id %in% hospitalization_table_part_five$patient_id]
 
-# Step 1: Count and sort languages, excluding "English", Unknown, and sign language
+# Step 1: Count and sort languages
 language_counts_cohort <- patient_language[
   !language_category %in% c(""), 
   .N, 
   by = language_category
-][order(-N)]
-fwrite(language_counts_cohort, file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
+][
+  , percent := 100 * N / sum(N)
+][
+  , `:=`(
+    N_display = fifelse(N < 10, "less than 10", as.character(N)),
+    percent_display = fifelse(N < 10, "less than 10", sprintf("%.1f", percent))
+  )
+][
+  order(-N)
+]
 
-# Get the top 5 most common languages
-#top_languages <- language_counts[1:5, language_category]
-
-# Non-English-non-spanish Language
-#non_english_non_spanish_language <- patient_language[
-#  !language_category %in% c("english", "unknown or na", "spanish", "sign language"), 
-#  .N, 
-#  by = language_category
-#][order(-N)]
-
-# Add top_five flag to patient_language
-#patient_language[, top_five := language_category %in% top_languages]
-
-#patient_language[, non_eng_non_span := language_category %in% non_english_non_spanish_language$language_category]
-
-#patient_language[, top_five_non_eng_non_spanish := fifelse(
-#  top_five == TRUE, 
-#  "top_five_non_eng_non_spanish",
-#  fifelse(language_category == "english", 
-#          "english", 
-#          fifelse(language_category == "spanish", 
-#                  "spanish", 
-#                  NA_character_))
-#)]
-
-#patient_language[, .N, by = top_five_non_eng_non_spanish][order(-N)]
-
-#patient_language[, non_eng := ifelse(language_category == "english", "english", "non_english")]
-
-#patient_language[, three_language_cat := fifelse(
-#  non_eng_non_span == TRUE, 
-#  "non_eng_non_span",
-#  fifelse(language_category == "english", 
-#          "english", 
-#          fifelse(language_category == "spanish", 
-#                  "spanish", 
-#                  NA_character_))
-#)]
+fwrite(language_counts_cohort[, .(language_category, N = N_display, percent = percent_display)], file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
 
 #Merge Back
 demographics_final <- merge(hospitalization_table_part_five, patient_language, by = "patient_id", all = TRUE)
@@ -1922,14 +1869,14 @@ time_to_first_rass_final <- time_to_first_rass_final[, .(hospitalization_id, tim
 rass_cohort_timestamps <- imv_runs_rass_simple[hospitalization_id %in% time_to_first_rass_final$hospitalization_id][, .(hospitalization_id, begin_imv, end_imv, imv_duration_hours_final)]
 
 # Calculate start_time (begin_imv)
-rass_cohort_timestamps[, start_time := as.POSIXct(begin_imv), by = hospitalization_id]
+rass_cohort_timestamps[, start_time := as.POSIXct(begin_imv)]
 
 # Calculate end_time based on the condition for each hospitalization_id
 rass_cohort_timestamps[, end_time := fifelse(
   imv_duration_hours_final >= 48,
   as.POSIXct(begin_imv) + hours(48),
   as.POSIXct(end_imv)
-), by = hospitalization_id]
+)]
 
 pat_assess_rass_cohort_clean <- pat_assess_rass_filt[hospitalization_id %in% time_to_first_rass_final$hospitalization_id]
 setorder(pat_assess_rass_cohort_clean, hospitalization_id, recorded_dttm)
@@ -1985,44 +1932,43 @@ rass_cumulative_neg <- total_timeline_rass_filt[, .(
   rass_cumulative_neg = sum(ifelse(rass_value < 0, rass_value, 0), na.rm = TRUE)
 ), by = hospitalization_id]
 
-rass_calc_timeline_merge <- merge(rass_calc_timeline, rass_measurements, by = "hospitalization_id", all = TRUE)
-rass_calc_timeline_merge_two <- merge(rass_calc_timeline_merge, rass_cumulative, by = "hospitalization_id", all = TRUE)
-rass_calc_timeline_merge_three <- merge(rass_calc_timeline_merge_two, rass_cumulative_neg, by = "hospitalization_id", all = TRUE)
-rass_calc_timeline_merge_four <- merge(rass_calc_timeline_merge_three, rass_median_by_hosp, by = "hospitalization_id", all = TRUE)
-
-# Compute RASS frequency (number of RASS values per observation period)
-rass_calc_timeline_merge_four[, rass_frequency_hrs := observation_time / rass_count]
- 
-rass_calc_timeline_merge_four[, rass_unweighted_avg := rass_cumulative / rass_count]
-
-# Define deep sedation based on the time-weighted RASS average
-rass_calc_timeline_merge_four[, deep_sedation_unweighted := rass_unweighted_avg < -3]
-
-# Define deep sedation based on median RASS
-rass_calc_timeline_merge_four[, median_rass_binary := median_rass_cont <= -3]
-
-# Sedation Index Score
-rass_calc_timeline_merge_four[, sedation_index_score := rass_cumulative_neg / rass_count]
-
 # Total Number of RASS Values -3 or lower
 rass_counts <- total_timeline_rass_filt[rass_value <= -3, .N, by = hospitalization_id]
 setnames(rass_counts, "N", "rass_below_minus_3_count")
 
-rass_calc_timeline_merge_five <- merge(rass_calc_timeline_merge_four, rass_counts, by = "hospitalization_id", all = TRUE)
+rass_calc_timeline_final <- reduce(
+  list(
+    rass_calc_timeline,
+    rass_measurements,
+    rass_cumulative,
+    rass_cumulative_neg,
+    rass_median_by_hosp,
+    rass_counts,
+    time_to_first_rass_final
+  ),
+  function(x, y) merge(x, y, by = "hospitalization_id", all = TRUE)
+)
 
-rass_calc_timeline_merge_six <- merge(rass_calc_timeline_merge_five, time_to_first_rass_final, by = "hospitalization_id", all = TRUE)
+# Compute RASS frequency (number of RASS values per observation period)
+rass_calc_timeline_final[, rass_frequency_hrs := observation_time / rass_count]
+ 
+rass_calc_timeline_final[, rass_unweighted_avg := rass_cumulative / rass_count]
+
+# Define deep sedation based on the time-weighted RASS average
+rass_calc_timeline_final[, deep_sedation_unweighted := rass_unweighted_avg < -3]
+
+# Define deep sedation based on median RASS
+rass_calc_timeline_final[, median_rass_binary := median_rass_cont <= -3]
+
+# Sedation Index Score
+rass_calc_timeline_final[, sedation_index_score := rass_cumulative_neg / rass_count]
 
 # Apply filtering
-rass_calc_timeline_filt <- rass_calc_timeline_merge_six[, .(hospitalization_id, rass_weighted_avg, rass_unweighted_avg, rass_frequency_hrs, time_to_first_rass, rass_count, deep_sedation_weighted, deep_sedation_unweighted, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score)]
+rass_calc_timeline_filt <- rass_calc_timeline_final[, .(hospitalization_id, rass_weighted_avg, rass_unweighted_avg, rass_frequency_hrs, time_to_first_rass, rass_count, deep_sedation_weighted, deep_sedation_unweighted, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score)]
 setnafill(rass_calc_timeline_filt, cols = "rass_below_minus_3_count", fill = 0)
 
 # Updated IMV
-#xx_part_six_filt <- part_six_imv_runs[hospitalization_id %in% rass_calc_timeline_filt$hospitalization_id]
-
 imv_runs_final <- merge(imv_runs_final, rass_calc_timeline_filt, by = "hospitalization_id", all = TRUE)
-
-#part_seven_imv_runs[imv_duration_hours_short>= 0, ] #JHU Patch
-#part_seven_imv_runs <- unique(part_seven_imv_runs, by = c("hospitalization_id"))
 
 #Hospital_icu_id
 set(imv_runs_final, j = "hospital_icu_id", 
@@ -2085,9 +2031,9 @@ n_after_step7b <- nrow(imv_runs_step7b)
 n_removed_step7b <- n_after_step7 - n_after_step7b
 
 #Step 8: Removed for missing, unknown, or non-verbal language
-imv_runs_step8 <- imv_runs_step7[!is.na(language_category) & language_category != "unknown or na" & language_category != "sign language" & language_category != ""]
+imv_runs_step8 <- imv_runs_step7b[!is.na(language_category) & language_category != "unknown or na" & language_category != "sign language" & language_category != ""]
 n_after_step8 <- nrow(imv_runs_step8)
-n_removed_step8 <- n_after_step7 - n_after_step8
+n_removed_step8 <- n_after_step7b - n_after_step8
 
 #Step 9: Removed for blank/missing ethnicity, race, sex categories
 imv_runs_step9 <- imv_runs_step8[
@@ -2210,8 +2156,6 @@ imv_runs_final_clean[, eligible_end := fifelse(
   window_end_28
 )]
 
-imv_runs_final_clean[, eligible_days := as.integer(eligible_end - window_start) + 1L]
-
 # Use hospital_days to determine days in 28-day window
 days_in_window <- merge(
   hospital_days,
@@ -2229,6 +2173,7 @@ days_in_window <- merge(
 ]
 
 # Summarize 28-day counts and merge back
+# For 28-day: used fixed denominator
 free_day_counts <- days_in_window[, .(
   hospital_days_28 = uniqueN(calendar_date),
   icu_days_28      = uniqueN(calendar_date[icu_day == TRUE]),
@@ -2247,6 +2192,16 @@ imv_runs_final_clean <- merge(
 for (col in c("hospital_days_28", "icu_days_28", "vent_days_28")) {
   imv_runs_final_clean[is.na(get(col)), (col) := 0L]
 }
+
+# Make sure all hospitalizations have at least 1 ventilator day (as we are defining it as any calendar day with at least some time spent on the ventilator)
+imv_runs_final_clean[
+  !is.na(imv_duration_hours_final) &
+    imv_duration_hours_final > 0 &
+    vent_days_28 == 0,
+  `:=`(
+    vent_days_28 = 1L
+  )
+]
 
 ###28-Day Mortality
 imv_runs_final_clean[, mortality_28day := !is.na(death_date) & death_date <= (begin_imv_date + 27)]
@@ -2274,6 +2229,7 @@ imv_runs_final_clean[mortality_28day == TRUE,
 
 # -----------------------------
 # 6-month hospital-free days
+# For 6-month: use survival-adjusted denominator
 # -----------------------------
 
 # Define 6-month calendar window
@@ -2337,10 +2293,9 @@ final_cohort_imv_runs <- imv_runs_final_clean
 
 ```
 
- 
-# PART FOUR: LAPS2
-```{r}
 
+# PART FOUR: LAPS2 calculated using labs/vitals from 24 hours BEFORE ICU admission (instead of 24 hours after hospital admission)
+```{r}
 #Prep labs, vitals, gcs tables
 #Labs
 labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
@@ -2352,136 +2307,136 @@ vitals_time_dependent <- vitals[vital_category %in% time_dependent_vitals & hosp
 #Filtered Patient Assessments
 patient_assess_gcs_time_dependent <- patient_assessments[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id & assessment_category == "gcs_total"]
 pat_assess_gcs_time_dependent <- patient_assess_gcs_time_dependent[, .(hospitalization_id, recorded_dttm, assessment_category, numerical_value)]
-#GCS
-pat_assess_gcs_time_dependent_wide <- dcast(pat_assess_gcs_time_dependent, 
-                   hospitalization_id + recorded_dttm ~ assessment_category, 
-                   value.var = "numerical_value", 
-                   fun.aggregate = mean,  # Aggregate duplicates using mean
-                   fill = NA)  # Fill missing values with NA
-setorder(pat_assess_gcs_time_dependent_wide, hospitalization_id, recorded_dttm)
 
-pat_assess_gcs_time_dependent_wide[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
+#GCS
+pat_assess_gcs_time_dependent_wide <- dcast(pat_assess_gcs_time_dependent,
+                   hospitalization_id + recorded_dttm ~ assessment_category,
+                   value.var = "numerical_value",
+                   fun.aggregate = mean,
+                   fill = NA)
+setorder(pat_assess_gcs_time_dependent_wide, hospitalization_id, recorded_dttm)
+pat_assess_gcs_time_dependent_wide#[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
+
 
 # LAPS2 Score Part 1: Encounter Data
-### change to hospital_icu
-clif_adt_hospital <-  adt |>
+
+clif_adt_hospital <- adt |>
   mutate(location_category = factor(location_category,
-                                    levels = (c("icu", "stepdown", "ward", "ed", "procedural", "other")),                                    ordered = TRUE)) |> 
-  group_by(hospitalization_id) |> 
-  arrange(hospitalization_id, location_category, in_dttm) |> 
-  
-  # first one will be ICU
-  slice_head(n=1) |> 
-  ungroup() |> 
+                                    levels = (c("icu", "stepdown", "ward", "ed", "procedural", "other")),
+                                    ordered = TRUE)) |>
+  group_by(hospitalization_id) |>
+  arrange(hospitalization_id, location_category, in_dttm) |>
+  slice_head(n = 1) |>
+  ungroup() |>
   dplyr::select(hospitalization_id,
-         hospital = hospital_id)
+                hospital = hospital_id)
 
-
-clif_adt_admit <-  adt |>
-  group_by(hospitalization_id) |> 
-  arrange(hospitalization_id, in_dttm) |> 
-  slice_head(n=1) |> 
-  ungroup() |> 
+clif_adt_admit <- adt |>
+  group_by(hospitalization_id) |>
+  arrange(hospitalization_id, in_dttm) |>
+  slice_head(n = 1) |>
+  ungroup() |>
   dplyr::select(hospitalization_id,
-         first_location_category = location_category)
-  
+                first_location_category = location_category)
 
 # fixing clif_labs to recorded_dttm
 if ("lab_collect_dttm" %in% colnames(labs_time_dependent)) {
   labs_time_dependent <- labs_time_dependent |> rename(recorded_dttm = lab_collect_dttm)
 }
 
-df_encounter_laps2_temp1 <- hospitalization |> 
-  left_join(patient_demographics) |> 
-  left_join(clif_adt_hospital) |> 
-  left_join(clif_adt_admit) |> 
-  
-  
-  # make dead/hospice column
+df_encounter_laps2_temp1 <- hospitalization |>
+  left_join(patient_demographics) |>
+  left_join(clif_adt_hospital) |>
+  left_join(clif_adt_admit) |>
+
+  # -------------------------------------------------------------------
+  # Join in icu_admission_dttm from cohort to anchor the window
+  # -------------------------------------------------------------------
+  left_join(
+    final_cohort_imv_runs |>
+      dplyr::select(hospitalization_id, icu_admission_dttm) |>
+      distinct(),
+    by = "hospitalization_id"
+  ) |>
+
   mutate(
     death_or_hospice_01 = fcase(
-      discharge_category %in% 
-        c("hospice", "dead", "expired", "died", "Hospice", "Expired")       , 1,
-      default                                         = 0
+      discharge_category %in%
+        c("hospice", "dead", "expired", "died", "Hospice", "Expired"), 1,
+      default = 0
     ),
-    
-    death_or_hospice_01       = as.factor(death_or_hospice_01),
-    
-    # make 24 hours after admission variable (to collect data from first 24 hours)
-    dt_24hours_after_admit    = admission_dttm + hours(24),
-    
-    # ED binary variable
-    ed_admit_01               = fifelse(first_location_category == "ed", 1, 0, 0),
-          # I think we used categorical in Rachel Kohn paper... Pat uses ED y/n
-          # admission source OR you can use ED variable
-    # Admit source variable (use one or the other)
-    # admission_type_category      = as.factor(admission_type_category),  don't have this yet
-    
-    # sex_category
-    female_01                 = fifelse(str_detect(sex_category, "female"), 1, 0, 0),
-    
+
+    death_or_hospice_01    = as.factor(death_or_hospice_01),
+
+    # Keep 24h after admit for pre-LAPS logistic regression (Part 3)
+    dt_24hours_after_admit = admission_dttm + hours(24),
+
+    # -------------------------------------------------------------------
+    # New window — 24 hours BEFORE ICU admission
+    # -------------------------------------------------------------------
+    dt_24hours_before_icu  = icu_admission_dttm - hours(24),
+
+    ed_admit_01  = fifelse(first_location_category == "ed", 1, 0, 0),
+    female_01    = fifelse(str_detect(sex_category, "female"), 1, 0, 0),
   )
 
 
-# LAPS2 Score Part 2:  Fix Anion Gap & Troponin_t
+# LAPS2 Score Part 2: Fix Anion Gap & Troponin_t
 
-if(any(labs_time_dependent$lab_category == "anion_gap", na.rm = TRUE)){
-  
+if (any(labs_time_dependent$lab_category == "anion_gap", na.rm = TRUE)) {
+
   print("you already have anion gap")
   message("we are going to remove anion_gap and recreate it for you")
   message("this way... all our analyses are the same")
-  
-  labs_time_dependent <- labs_time_dependent |> 
+
+  labs_time_dependent <- labs_time_dependent |>
     filter(lab_category != "anion_gap")
 
-    print("Anion gap removed... please proceed!!")
-  
+  print("Anion gap removed... please proceed!!")
+
 } else {
-  
+
   print("no anion_gap found... we will make one for you!!")
-  
-  
+
 }
 
-if(any(labs_time_dependent$lab_category == "troponin_t")){
-  
+if (any(labs_time_dependent$lab_category == "troponin_t")) {
+
   print("you already have trop_t")
   message("we are going to change to trop_i levels")
-  
-  labs_time_dependent <- labs_time_dependent |> 
-    
+
+  labs_time_dependent <- labs_time_dependent |>
+
     mutate(lab_value_numeric = fcase(
       lab_category == "troponin_t",
       lab_value_numeric / 1000,
       default = lab_value_numeric
-    )) |> 
-    
+    )) |>
+
     mutate(lab_category = fcase(
       lab_category == "troponin_t",
       "troponin_i",
       rep_len(TRUE, length(lab_category)), lab_category
-    )) 
-    
-    print("Troponin fixed ... please proceed!!")
-  
+    ))
+
+  print("Troponin fixed ... please proceed!!")
+
 } else {
-  
+
   print("no need to fix troponin !!")
-  
+
 }
 
-# Set a time tolerance, e.g., 1 hour
+# Set a time tolerance of 1 hour for anion gap calculation
 time_tolerance <- hours(1)
 
-# Create recorded_date from recorded_dttm
 labs_time_dependent <- labs_time_dependent %>%
   mutate(recorded_date = as.Date(recorded_dttm))
 
-# Separate the lab values for sodium, bicarbonate, and chloride, and create recorded_date
 sodium_df <- labs_time_dependent %>%
   filter(lab_category == "sodium") %>%
   dplyr::select(hospitalization_id, recorded_dttm, recorded_date, sodium = lab_value_numeric,
-         lab_order_dttm, lab_result_dttm)
+                lab_order_dttm, lab_result_dttm)
 
 bicarbonate_df <- labs_time_dependent %>%
   filter(lab_category == "bicarbonate") %>%
@@ -2491,872 +2446,686 @@ chloride_df <- labs_time_dependent %>%
   filter(lab_category == "chloride") %>%
   dplyr::select(hospitalization_id, recorded_dttm, recorded_date, chloride = lab_value_numeric)
 
-# Perform a join by clif_hospitalizations_joined_id and recorded_date to limit the join size
 anion_gap_df <- sodium_df %>%
   full_join(bicarbonate_df, by = c("hospitalization_id", "recorded_date")) %>%
   full_join(chloride_df, by = c("hospitalization_id", "recorded_date")) %>%
-  
-  # Calculate the time differences between recorded_dttm values
-  mutate(time_diff_sodium_bicarbonate = abs(difftime(recorded_dttm.x, recorded_dttm.y, units = "mins")),
-         time_diff_sodium_chloride = abs(difftime(recorded_dttm.x, recorded_dttm, units = "mins")),
-         
-         # Apply the time tolerance (1 hour)
-         within_tolerance_bicarbonate = time_diff_sodium_bicarbonate <= time_tolerance,
-         within_tolerance_chloride = time_diff_sodium_chloride <= time_tolerance) %>%
-  
-  # Filter to retain rows where the time differences are within the tolerance
-  filter(within_tolerance_bicarbonate & within_tolerance_chloride) %>%
-  
-  # Calculate the anion gap: sodium - (bicarbonate + chloride)
-  mutate(anion_gap = sodium - (bicarbonate + chloride)) %>%
-  
-  # Select the relevant columns
-  dplyr::select(hospitalization_id, recorded_dttm.x, anion_gap, lab_order_dttm, lab_result_dttm, recorded_date)
-
-# Rename recorded_dttm.x to recorded_dttm for consistency
-anion_gap_df <- anion_gap_df %>%
-  mutate(reference_unit = "meq/l") |> 
-  mutate(lab_name = "anion gap") |> 
-  mutate(lab_category = "anion_gap") |>
-  rename(lab_value_numeric = anion_gap) |> 
-  rename(recorded_dttm = recorded_dttm.x)
-
-
-labs_time_dependent <- labs_time_dependent |> 
-              bind_rows(anion_gap_df)
-
-# LAPS2 Score Part 3: Fix/Prep Labs for LAPS2 Risk Prediction (Prelaps)
-############
-# Pre-Laps... want the most recent within 24 hours of admission
-############
-
-df_pre_laps2_prep1 <- 
-  df_encounter_laps2_temp1 |> 
-  left_join(labs_time_dependent |> 
-              filter(lab_category %in% c("anion_gap",
-                                         "bicarbonate", # FROM BMP
-                                         "bun",
-                                         "creatinine",
-                                         "sodium")),
-            
-            # join only if between the first 24 hours
-            by = join_by(hospitalization_id, 
-                         dt_24hours_after_admit >= recorded_dttm) 
-  ) |> 
-  # Min/Max
-  #     bun            max
-  #     creatinine     min
-  #     bun/cr         max
-  #     bun/cr         most recent (prelaps)
-  #     anion_gap      max
-  #     bicarbonate min
-  #     ag/bicarb      most recent (prelaps)
-  #     sodium         min
-  #     sodium         most recent (prelaps)
-       
-  group_by(hospitalization_id, recorded_dttm, lab_category) |> 
-  # using obs lets you get away with duplicates when going wider and can fix later!
-  mutate(obs = row_number()) |> 
-  ungroup() |> 
-  pivot_wider(
-    id_cols = c(hospitalization_id, recorded_dttm, obs),
-    names_from = lab_category,
-    values_from = lab_value_numeric,
-    # names_prefix = "lab_wide_",
-    # values_fill = NA
-  ) |>
-  
-  # Quick min/max for duplicates at the SAME time
-  dplyr::select(-obs) |> 
-  distinct() 
-
-# find the duplicates by recorded_dttm
-df_pre_laps2_prep2 <- df_pre_laps2_prep1 |> 
-  arrange(hospitalization_id, recorded_dttm) |> 
-  group_by(hospitalization_id, recorded_dttm) |>
-  # mutate(n = n()) |> 
-  # filter(n > 1) |> 
-  summarise(
-    bun               = fmax(bun, na.rm = TRUE),
-    creatinine        = fmin(creatinine, na.rm = TRUE),
-    bicarbonate       = fmin(bicarbonate, na.rm = TRUE),
-    anion_gap         = fmax(anion_gap, na.rm = TRUE),
-    sodium            = fmin(sodium, na.rm = TRUE),
-
-    .groups = "drop"
-  ) |> 
-  
-  # replace inf with NAs
-  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-  
-  # get rid of duplicate rows
-  distinct() |> 
-  
-  # order appropriately for when getting last labs for "most recent"
-  arrange(hospitalization_id, recorded_dttm) |> 
-  
-  # carry forward
-  group_by(hospitalization_id) |> 
-  
-  # fill in ... its only the first 24 hours so its ok
-  fill(c(bun,
-         creatinine,
-         bicarbonate,
-         anion_gap,
-         sodium), 
-       .direction = "downup") |>
-  
-  # ? time shift if needed
-  
-  # get the most recent lab (aka last) based on recorded_dttm
-    mutate(
-      bun_recent                = flast(bun, na.rm = TRUE),
-      creatinine_recent         = flast(creatinine, na.rm = TRUE),
-      bicarbonate_recent        = flast(bicarbonate, na.rm = TRUE),
-      anion_gap_recent          = flast(anion_gap, na.rm = TRUE),
-      sodium_recent             = flast(sodium, na.rm = TRUE)
-           ) |> 
-  ungroup() |> 
-  dplyr::select(hospitalization_id, ends_with("recent")) |> 
-
-  # final pre-laps labs needed
   mutate(
-    # make ratios
-    sodium              = sodium_recent,
-    bun_cr_ratio        = bun_recent/creatinine_recent,
-    ag_hco3_ratio       = (anion_gap_recent/bicarbonate_recent)*1000
-  ) |> 
-  dplyr::select(-ends_with("recent")) |> 
-  
-  # replace inf with NAs (sometimes it happens when divided by zero)
-  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-  
+    time_diff_sodium_bicarbonate = abs(difftime(recorded_dttm.x, recorded_dttm.y, units = "mins")),
+    time_diff_sodium_chloride    = abs(difftime(recorded_dttm.x, recorded_dttm, units = "mins")),
+    within_tolerance_bicarbonate = time_diff_sodium_bicarbonate <= time_tolerance,
+    within_tolerance_chloride    = time_diff_sodium_chloride <= time_tolerance
+  ) %>%
+  filter(within_tolerance_bicarbonate & within_tolerance_chloride) %>%
+  mutate(anion_gap = sodium - (bicarbonate + chloride)) %>%
+  dplyr::select(hospitalization_id, recorded_dttm.x, anion_gap, lab_order_dttm, lab_result_dttm, recorded_date) %>%
+  mutate(
+    reference_unit = "meq/l",
+    lab_name       = "anion gap",
+    lab_category   = "anion_gap"
+  ) %>%
+  rename(
+    lab_value_numeric = anion_gap,
+    recorded_dttm     = recorded_dttm.x
+  )
+
+labs_time_dependent <- labs_time_dependent |>
+  bind_rows(anion_gap_df)
+
+
+# LAPS2 Score Part 3: Fix/Prep Labs for Pre-LAPS2 Logistic Regression
+# NOTE: Pre-LAPS still uses 24h after hospital admission — this feeds the
+#       logistic regression model that generates p(death/hospice), which
+#       is a patient-level risk flag, not a time-varying score.
+
+df_pre_laps2_prep1 <-
+  df_encounter_laps2_temp1 |>
+  left_join(
+    labs_time_dependent |>
+      filter(lab_category %in% c("anion_gap", "bicarbonate", "bun", "creatinine", "sodium")),
+    by = join_by(hospitalization_id,
+                 dt_24hours_after_admit >= recorded_dttm)
+  ) |>
+  group_by(hospitalization_id, recorded_dttm, lab_category) |>
+  mutate(obs = row_number()) |>
+  ungroup() |>
+  pivot_wider(
+    id_cols     = c(hospitalization_id, recorded_dttm, obs),
+    names_from  = lab_category,
+    values_from = lab_value_numeric
+  ) |>
+  dplyr::select(-obs) |>
   distinct()
-        
- df_pre_laps_merging <- df_pre_laps2_prep2 |> 
-   left_join(
-     df_encounter_laps2_temp1 |> 
-       dplyr::select(
-         hospitalization_id,
-         admission_dttm,
-         age = age_at_admission,
-         female_01,
-         ed_admit_01,
-         # admission_type_category,
-         death_or_hospice_01
-       ) |> 
-       distinct(),
-     join_by(hospitalization_id)
-   ) |> 
-   mutate(
+
+df_pre_laps2_prep2 <- df_pre_laps2_prep1 |>
+  arrange(hospitalization_id, recorded_dttm) |>
+  group_by(hospitalization_id, recorded_dttm) |>
+  summarise(
+    bun         = fmax(bun, na.rm = TRUE),
+    creatinine  = fmin(creatinine, na.rm = TRUE),
+    bicarbonate = fmin(bicarbonate, na.rm = TRUE),
+    anion_gap   = fmax(anion_gap, na.rm = TRUE),
+    sodium      = fmin(sodium, na.rm = TRUE),
+    .groups     = "drop"
+  ) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct() |>
+  arrange(hospitalization_id, recorded_dttm) |>
+  group_by(hospitalization_id) |>
+  fill(c(bun, creatinine, bicarbonate, anion_gap, sodium), .direction = "downup") |>
+  mutate(
+    bun_recent        = flast(bun, na.rm = TRUE),
+    creatinine_recent = flast(creatinine, na.rm = TRUE),
+    bicarbonate_recent = flast(bicarbonate, na.rm = TRUE),
+    anion_gap_recent  = flast(anion_gap, na.rm = TRUE),
+    sodium_recent     = flast(sodium, na.rm = TRUE)
+  ) |>
+  ungroup() |>
+  dplyr::select(hospitalization_id, ends_with("recent")) |>
+  mutate(
+    sodium       = sodium_recent,
+    bun_cr_ratio = bun_recent / creatinine_recent,
+    ag_hco3_ratio = (anion_gap_recent / bicarbonate_recent) * 1000
+  ) |>
+  dplyr::select(-ends_with("recent")) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct()
+
+df_pre_laps_merging <- df_pre_laps2_prep2 |>
+  left_join(
+    df_encounter_laps2_temp1 |>
+      dplyr::select(
+        hospitalization_id,
+        admission_dttm,
+        age = age_at_admission,
+        female_01,
+        ed_admit_01,
+        death_or_hospice_01
+      ) |>
+      distinct(),
+    join_by(hospitalization_id)
+  ) |>
+  mutate(
     age_cat = case_when(
       age >= 85 ~ 5,
       age >= 75 ~ 4,
       age >= 65 ~ 3,
       age >= 40 ~ 2,
-      TRUE ~ 1
+      TRUE      ~ 1
     )
-  ) |> 
-   mutate(
-      # impute to normal (8)
+  ) |>
+  mutate(
     bun_cr_ratio = fifelse(is.na(bun_cr_ratio), 8, bun_cr_ratio),
-     
     buncreat_cat = case_when(
-      bun_cr_ratio        >= 24 ~ 4,
-      bun_cr_ratio        >= 16 ~ 3,
-      bun_cr_ratio        < 8   ~ 2,
-      TRUE                      ~ 1
+      bun_cr_ratio >= 24 ~ 4,
+      bun_cr_ratio >= 16 ~ 3,
+      bun_cr_ratio < 8   ~ 2,
+      TRUE               ~ 1
     )
-  ) |> 
-     mutate(
-      # impute to normal (135)
+  ) |>
+  mutate(
     sodium = fifelse(is.na(sodium), 135, sodium),
     na_cat = case_when(
-      sodium            >= 155  ~ 7,
-      sodium            >= 149  ~ 6,
-      sodium            >= 146  ~ 5,
-      sodium            >= 132  ~ 4,
-      sodium            >= 129  ~ 3,
-      sodium            < 129   ~ 2,
-      TRUE                      ~ 1
+      sodium >= 155 ~ 7,
+      sodium >= 149 ~ 6,
+      sodium >= 146 ~ 5,
+      sodium >= 132 ~ 4,
+      sodium >= 129 ~ 3,
+      sodium < 129  ~ 2,
+      TRUE          ~ 1
     )
-  ) |> 
-     mutate(
-      # impute to normal (200)
+  ) |>
+  mutate(
     ag_hco3_ratio = fifelse(is.na(ag_hco3_ratio), 200, ag_hco3_ratio),
-    aghco3_cat = case_when(
-      ag_hco3_ratio        >= 600  ~ 4,
-      ag_hco3_ratio        >= 400  ~ 3,
-      ag_hco3_ratio        < 200   ~ 2,
-      TRUE                         ~ 1,
+    aghco3_cat    = case_when(
+      ag_hco3_ratio >= 600 ~ 4,
+      ag_hco3_ratio >= 400 ~ 3,
+      ag_hco3_ratio < 200  ~ 2,
+      TRUE                 ~ 1
     )
   )
- 
- # logistic regression to obtain p(death/hospice)
- lr_model <-
-  glm(
-    death_or_hospice_01 ~
-      age +
-      female_01 +
-      ed_admit_01 +
-      bun_cr_ratio +
-      sodium +
-      ag_hco3_ratio,
-    family = "binomial",
-    data   = df_pre_laps_merging
-  )
+
+# Logistic regression for p(death/hospice) — patient-level risk flag
+lr_model <- glm(
+  death_or_hospice_01 ~
+    age +
+    female_01 +
+    ed_admit_01 +
+    bun_cr_ratio +
+    sodium +
+    ag_hco3_ratio,
+  family = "binomial",
+  data   = df_pre_laps_merging
+)
 
 tidy(lr_model)
 pR2(lr_model)["McFadden"]
 
-df_pre_laps_final  <- df_pre_laps_merging |> 
-  mutate(p_death = predict(lr_model, df_pre_laps_merging, type = "response")) |> 
-  mutate(
-    high_risk = case_when(
-      p_death >= 0.06 ~ 1,
-      TRUE ~ 0
-    )) %>%
+df_pre_laps_final <- df_pre_laps_merging |>
+  mutate(p_death = predict(lr_model, df_pre_laps_merging, type = "response")) |>
+  mutate(high_risk = case_when(
+    p_death >= 0.06 ~ 1,
+    TRUE            ~ 0
+  )) |>
   dplyr::select(hospitalization_id, p_death, high_risk)
 
-# LAPS2 Score Part 4: Prep laps2 labs ALL
-##~~~~~~~~~~~~~~~~~~~~~
-# LAPS2 time
-##~~~~~~~~~~~~~~~~~~~~~
- 
+
+# LAPS2 Score Part 4: Prep LAPS2 Labs (All Days — rolling join, no time filter)
+
 df_encounter_laps2_temp2 <- df_encounter_laps2_temp1[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
+labs_time_dependent_2    <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 
-df_laps2_prep1 <- 
-  df_encounter_laps2_temp2 |> 
-  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm) |> 
-  distinct() |> 
-  # slice_head(n=1000) |> 
-  left_join(labs_time_dependent_2 |> 
-              filter(lab_category %in% c("albumin",
-                                     "anion_gap",
-                                     "bilirubin_total",
-                                     "bun",
-                                     "bicarbonate",
-                                     "creatinine",
-                                     "glucose_serum",
-                                     # "hematocrit",
-                                     "hemoglobin",
-                                     "lactate",
-                                     "pco2_arterial",
-                                     "po2_arterial",
-                                     "ph_arterial",
-                                     "platelet_count",
-                                     "so2_arterial",
-                                     "sodium",
-                                     "troponin_i",
-                                     "wbc")) |> 
-              dplyr::select(-lab_order_dttm),
-            
-            # join only if between the first 24 hours
-            by = join_by(hospitalization_id)) |> 
-  # making all hemoglobin into hematocrits
-  mutate(lab_value_numeric = fifelse(lab_category == "hemoglobin", lab_value_numeric*3, lab_value_numeric)) |> 
-  mutate(lab_category = fifelse(lab_category == "hemoglobin", "hematocrit", lab_category)) |> 
-  mutate(lab_category = fifelse(lab_category == "lactate", "lactic_acid", lab_category)) |> 
-
-    # using obs lets you get away with duplicates when going wider and can fix later!
-  group_by(hospitalization_id, recorded_dttm, lab_category) |> 
-  mutate(obs = row_number()) |> 
-  ungroup() |> 
-  
-  # pivot wider to get columns
-  pivot_wider(
-    id_cols = c(hospitalization_id, recorded_dttm, obs),
-    names_from = lab_category,
-    values_from = lab_value_numeric,
-    # names_prefix = "lab_wide_",
-    # values_fill = NA
+df_laps2_prep1 <-
+  df_encounter_laps2_temp2 |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm) |>
+  distinct() |>
+  left_join(
+    labs_time_dependent_2 |>
+      filter(lab_category %in% c(
+        "albumin", "anion_gap", "bilirubin_total", "bun", "bicarbonate",
+        "creatinine", "glucose_serum", "hemoglobin", "lactate",
+        "pco2_arterial", "po2_arterial", "ph_arterial", "platelet_count",
+        "so2_arterial", "sodium", "troponin_i", "wbc"
+      )) |>
+      dplyr::select(-lab_order_dttm),
+    by = join_by(hospitalization_id)
   ) |>
-  
-  # Quick min/max for duplicates at the SAME time
-  dplyr::select(-obs) |> 
-  mutate(lab_date = date(recorded_dttm)) |> 
-  distinct() 
+  mutate(
+    lab_value_numeric = fifelse(lab_category == "hemoglobin", lab_value_numeric * 3, lab_value_numeric),
+    lab_category      = fifelse(lab_category == "hemoglobin", "hematocrit", lab_category),
+    lab_category      = fifelse(lab_category == "lactate", "lactic_acid", lab_category)
+  ) |>
+  group_by(hospitalization_id, recorded_dttm, lab_category) |>
+  mutate(obs = row_number()) |>
+  ungroup() |>
+  pivot_wider(
+    id_cols     = c(hospitalization_id, recorded_dttm, obs),
+    names_from  = lab_category,
+    values_from = lab_value_numeric
+  ) |>
+  dplyr::select(-obs) |>
+  mutate(lab_date = date(recorded_dttm)) |>
+  distinct()
 
-#ni_tic()
-# find the duplicates by day
 df_laps2_prep2 <- df_laps2_prep1 |>
-  # arrange(clif_hospitalizations_joined_id, recorded_dttm) |>
   group_by(hospitalization_id, lab_date) |>
-  # mutate(n = n()) |>
-  # filter(n > 1) |>
   summarise(
-    albumin             = fmin(albumin, na.rm = TRUE),
-    anion_gap           = fmax(anion_gap, na.rm = TRUE),
-    bilirubin_total     = fmax(bilirubin_total, na.rm = TRUE),
-    bun                 = fmax(bun, na.rm = TRUE),
-    bicarbonate         = fmin(bicarbonate, na.rm = TRUE),
-    creatinine          = fmax(creatinine, na.rm = TRUE),
-    glucose_serum       = fmin(glucose_serum, na.rm = TRUE),
-    hematocrit          = fmax(hematocrit, na.rm = TRUE),
-    lactic_acid         = fmax(lactic_acid, na.rm = TRUE),
-    pco2_arterial       = fmax(pco2_arterial, na.rm = TRUE),
-    po2_arterial        = fmax(po2_arterial, na.rm = TRUE),
-    ph_arterial         = fmin(ph_arterial, na.rm = TRUE),
-    platelet_count      = fmin(platelet_count, na.rm = TRUE),
-    so2_arterial        = fmin(so2_arterial, na.rm = TRUE),
-    sodium              = fmin(sodium, na.rm = TRUE),
-    troponin            = fmax(troponin_i, na.rm = TRUE),
-    wbc                 = fmin(wbc, na.rm = TRUE
-    ), 
-
-    .groups = "drop"
-  ) |> 
-  
-    # bun_cr_ratio
-  mutate(
-    bun_cr_ratio = bun / creatinine
-  ) |> 
-  
-    mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-  # get rid of duplicate rows
-  distinct() 
-
-
-
-# LAPS2 Score Part 5: Labs day one for cohort
-
-df_laps2_dayone_prep1 <- 
-  df_encounter_laps2_temp2 |> 
-  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, dt_24hours_after_admit) |> 
-  distinct() |> 
-  left_join(labs_time_dependent_2 |> 
-              filter(lab_category %in% c("albumin",
-                                     "anion_gap",
-                                     "bilirubin_total",
-                                     "bun",
-                                     "bicarbonate",
-                                     "creatinine",
-                                     "glucose_serum",
-                                     # "hematocrit",
-                                     "hemoglobin",
-                                     "lactate",
-                                     "pco2_arterial",
-                                     "po2_arterial",
-                                     "ph_arterial",
-                                     "platelet_count",
-                                     "so2_arterial",
-                                     "sodium",
-                                     "troponin_i",
-                                     "wbc")) |>            
-              dplyr::select(-lab_order_dttm),
-            
-            # join only if between the first 24 hours
-            by = join_by(hospitalization_id, 
-                         dt_24hours_after_admit >= recorded_dttm)
-  ) |> 
-
-  # making all hemoglobin into hematocrits
-  mutate(lab_value_numeric = fifelse(lab_category == "hemoglobin", lab_value_numeric*3, lab_value_numeric)) |> 
-  mutate(lab_category = fifelse(lab_category == "hemoglobin", "hematocrit", lab_category)) |> 
-  mutate(lab_category = fifelse(lab_category == "lactate", "lactic_acid", lab_category)) |> 
-  
-  group_by(hospitalization_id, recorded_dttm, lab_category) |> 
-  # using obs lets you get away with duplicates when going wider and can fix later!
-  mutate(obs = row_number()) |> 
-  ungroup() |> 
-  
-  # pivot wider to get columns
-  pivot_wider(
-    id_cols = c(hospitalization_id, recorded_dttm, obs, admission_dttm),
-    names_from = lab_category,
-    values_from = lab_value_numeric,
-    # names_prefix = "lab_wide_",
-    # values_fill = NA
+    albumin         = fmin(albumin, na.rm = TRUE),
+    anion_gap       = fmax(anion_gap, na.rm = TRUE),
+    bilirubin_total = fmax(bilirubin_total, na.rm = TRUE),
+    bun             = fmax(bun, na.rm = TRUE),
+    bicarbonate     = fmin(bicarbonate, na.rm = TRUE),
+    creatinine      = fmax(creatinine, na.rm = TRUE),
+    glucose_serum   = fmin(glucose_serum, na.rm = TRUE),
+    hematocrit      = fmax(hematocrit, na.rm = TRUE),
+    lactic_acid     = fmax(lactic_acid, na.rm = TRUE),
+    pco2_arterial   = fmax(pco2_arterial, na.rm = TRUE),
+    po2_arterial    = fmax(po2_arterial, na.rm = TRUE),
+    ph_arterial     = fmin(ph_arterial, na.rm = TRUE),
+    platelet_count  = fmin(platelet_count, na.rm = TRUE),
+    so2_arterial    = fmin(so2_arterial, na.rm = TRUE),
+    sodium          = fmin(sodium, na.rm = TRUE),
+    troponin        = fmax(troponin_i, na.rm = TRUE),
+    wbc             = fmin(wbc, na.rm = TRUE),
+    .groups         = "drop"
   ) |>
-  
-  # Quick min/max for duplicates at the SAME time
-  dplyr::select(-obs) |> 
-  distinct() 
-
-# get min/max
-df_laps2_dayone_prep2 <- df_laps2_dayone_prep1 |>
-  arrange(hospitalization_id, recorded_dttm) |> 
-  
-  # filter out those without a recorded_dttm so we don't add a date later
-  filter(!is.na(recorded_dttm)) |> 
-  # if we make "lab_date" the encounter date... then we are switching all labs within 24hr of admission to the "day 1" in a sneaky fashion
-  mutate(lab_date = date(admission_dttm)) |> # make it all the same day 1
-  group_by(hospitalization_id, lab_date) |>
-  # mutate(n = n()) |>
-  # filter(n > 1) |>
-  summarise(
-    albumin             = fmin(albumin, na.rm = TRUE),
-    anion_gap           = fmax(anion_gap, na.rm = TRUE),
-    bilirubin_total     = fmax(bilirubin_total, na.rm = TRUE),
-    bun                 = fmax(bun, na.rm = TRUE),
-    bicarbonate         = fmin(bicarbonate, na.rm = TRUE),
-    creatinine          = fmax(creatinine, na.rm = TRUE),
-    glucose_serum       = fmin(glucose_serum, na.rm = TRUE),
-    hematocrit          = fmax(hematocrit, na.rm = TRUE),
-    lactic_acid         = fmax(lactic_acid, na.rm = TRUE),
-    pco2_arterial       = fmax(pco2_arterial, na.rm = TRUE),
-    po2_arterial        = fmax(po2_arterial, na.rm = TRUE),
-    ph_arterial         = fmin(ph_arterial, na.rm = TRUE),
-    platelet_count      = fmin(platelet_count, na.rm = TRUE),
-    so2_arterial        = fmin(so2_arterial, na.rm = TRUE),
-    sodium              = fmin(sodium, na.rm = TRUE),
-    troponin            = fmax(troponin_i, na.rm = TRUE),
-    wbc                 = fmin(wbc, na.rm = TRUE
-    ),
-
-    .groups = "drop"
-  ) |> 
-  
-    # bun_cr_ratio
   mutate(
     bun_cr_ratio = bun / creatinine
-  ) |> 
-  
-    # replace inf with NAs
-  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-
-    # get rid of duplicate rows
-  distinct() 
+  ) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct()
 
 
+# LAPS2 Score Part 5: Labs in 24h Window BEFORE ICU Admission (replaces day-one window)
+# -------------------------------------------------------------------
+# Was dt_24hours_after_admit >= recorded_dttm (24h after hospital admit)
+#     Now:  icu_admission_dttm  >= recorded_dttm  (up to ICU admit)
+#     AND dt_24hours_before_icu <= recorded_dttm (no earlier than 24h before ICU admit)
+# -------------------------------------------------------------------
 
-# switch out the day 1 stuff 
-df_laps2_final <- df_laps2_prep2 |> anti_join(df_laps2_dayone_prep2 |> 
-                              dplyr::select(hospitalization_id, lab_date)) |> 
-  bind_rows(df_laps2_dayone_prep2) |> 
-  arrange(hospitalization_id, lab_date) |> 
-  
+df_laps2_dayone_prep1 <-
+  df_encounter_laps2_temp2 |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm,
+                icu_admission_dttm, dt_24hours_before_icu) |>   # CHANGE: ICU window cols
+  distinct() |>
+  left_join(
+    labs_time_dependent_2 |>
+      filter(lab_category %in% c(
+        "albumin", "anion_gap", "bilirubin_total", "bun", "bicarbonate",
+        "creatinine", "glucose_serum", "hemoglobin", "lactate",
+        "pco2_arterial", "po2_arterial", "ph_arterial", "platelet_count",
+        "so2_arterial", "sodium", "troponin_i", "wbc"
+      )) |>
+      dplyr::select(-lab_order_dttm),
 
-  # filter out NA for lab date
+    # CHANGE: 24h window before ICU admission
+    by = join_by(
+      hospitalization_id,
+      icu_admission_dttm   >= recorded_dttm,
+      dt_24hours_before_icu <= recorded_dttm
+    )
+  ) |>
+  mutate(
+    lab_value_numeric = fifelse(lab_category == "hemoglobin", lab_value_numeric * 3, lab_value_numeric),
+    lab_category      = fifelse(lab_category == "hemoglobin", "hematocrit", lab_category),
+    lab_category      = fifelse(lab_category == "lactate", "lactic_acid", lab_category)
+  ) |>
+  group_by(hospitalization_id, recorded_dttm, lab_category) |>
+  mutate(obs = row_number()) |>
+  ungroup() |>
+  pivot_wider(
+    id_cols     = c(hospitalization_id, recorded_dttm, obs, admission_dttm, icu_admission_dttm),  # CHANGE: keep icu_admission_dttm
+    names_from  = lab_category,
+    values_from = lab_value_numeric
+  ) |>
+  dplyr::select(-obs) |>
+  distinct()
+
+df_laps2_dayone_prep2 <- df_laps2_dayone_prep1 |>
+  arrange(hospitalization_id, recorded_dttm) |>
+  filter(!is.na(recorded_dttm)) |>
+
+  # CHANGE: Anchor lab_date to ICU admission date (was admission_dttm)
+  mutate(lab_date = date(icu_admission_dttm)) |>
+
+  group_by(hospitalization_id, lab_date) |>
+  summarise(
+    albumin         = fmin(albumin, na.rm = TRUE),
+    anion_gap       = fmax(anion_gap, na.rm = TRUE),
+    bilirubin_total = fmax(bilirubin_total, na.rm = TRUE),
+    bun             = fmax(bun, na.rm = TRUE),
+    bicarbonate     = fmin(bicarbonate, na.rm = TRUE),
+    creatinine      = fmax(creatinine, na.rm = TRUE),
+    glucose_serum   = fmin(glucose_serum, na.rm = TRUE),
+    hematocrit      = fmax(hematocrit, na.rm = TRUE),
+    lactic_acid     = fmax(lactic_acid, na.rm = TRUE),
+    pco2_arterial   = fmax(pco2_arterial, na.rm = TRUE),
+    po2_arterial    = fmax(po2_arterial, na.rm = TRUE),
+    ph_arterial     = fmin(ph_arterial, na.rm = TRUE),
+    platelet_count  = fmin(platelet_count, na.rm = TRUE),
+    so2_arterial    = fmin(so2_arterial, na.rm = TRUE),
+    sodium          = fmin(sodium, na.rm = TRUE),
+    troponin        = fmax(troponin_i, na.rm = TRUE),
+    wbc             = fmin(wbc, na.rm = TRUE),
+    .groups         = "drop"
+  ) |>
+  mutate(bun_cr_ratio = bun / creatinine) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct()
+
+# Swap in the ICU-anchored day-one labs
+df_laps2_final <- df_laps2_prep2 |>
+  anti_join(df_laps2_dayone_prep2 |> dplyr::select(hospitalization_id, lab_date)) |>
+  bind_rows(df_laps2_dayone_prep2) |>
+  arrange(hospitalization_id, lab_date) |>
   filter(!is.na(lab_date))
 
 
 # LAPS2 Score Part 6: GCS Fix
-
 df_gcs_merge_ready <- pat_assess_gcs_time_dependent_wide |>
   mutate(vital_value = case_when(
-    gcs_total %in% c(14, 15)                ~ 1,
-    gcs_total %in% c(8, 9, 10, 11, 12, 13)  ~ 3,
-    gcs_total %in% c(2, 3, 4, 5, 6, 7)      ~ 4,
-    TRUE                                    ~ NA   # we account for this when doing the points later
+    gcs_total %in% c(14, 15)               ~ 1,
+    gcs_total %in% c(8, 9, 10, 11, 12, 13) ~ 3,
+    gcs_total %in% c(2, 3, 4, 5, 6, 7)     ~ 4,
+    TRUE                                   ~ NA
   )) |>
-  mutate(vital_category = "gcs") |> 
-  dplyr::select(hospitalization_id,
-         vital_category,
-         recorded_dttm,
-         vital_value,
-         )
-
+  mutate(vital_category = "gcs") |>
+  dplyr::select(hospitalization_id, vital_category, recorded_dttm, vital_value)
 
 df_vitals_gcs <- vitals_time_dependent |>
-              filter(vital_category %in% c("temp_c",
-                                       "sbp",
-                                       "spo2",
-                                       "heart_rate",
-                                       "respiratory_rate")) |>
-              # dplyr::select(-meas_site_name) |> 
-              
-                          # get gcs in there now
-              bind_rows(df_gcs_merge_ready)
+  filter(vital_category %in% c("temp_c", "sbp", "spo2", "heart_rate", "respiratory_rate")) |>
+  bind_rows(df_gcs_merge_ready)
 
 
-# LAPS2 Score Part 7: Combine Vitals All and GCS
-
-df_laps2_vitals_prep1 <- 
-  df_encounter_laps2_temp1 |> 
+# LAPS2 Score Part 7: Combine Vitals All and GCS (All Days)
+df_laps2_vitals_prep1 <-
+  df_encounter_laps2_temp1 |>
   dplyr::select(hospitalization_id, admission_dttm, discharge_dttm) |>
-  distinct() |> 
-  left_join(df_vitals_gcs,
-            
-            # join by the encounter ID
-            by = join_by(hospitalization_id)) |> 
-  
-    group_by(hospitalization_id, recorded_dttm, vital_category) |> 
-  # using obs lets you get away with duplicates when going wider and can fix later!
-  mutate(obs = row_number()) |> 
-  ungroup() |> 
+  distinct() |>
+  left_join(df_vitals_gcs, by = join_by(hospitalization_id)) |>
+  group_by(hospitalization_id, recorded_dttm, vital_category) |>
+  mutate(obs = row_number()) |>
+  ungroup() |>
   pivot_wider(
-    id_cols = c(hospitalization_id, recorded_dttm, obs),
-    names_from = vital_category,
-    values_from = vital_value,
-    # names_prefix = "vital_wide_",
-    # values_fill = NA
+    id_cols     = c(hospitalization_id, recorded_dttm, obs),
+    names_from  = vital_category,
+    values_from = vital_value
   ) |>
-  
-  #fixing temp 
-  mutate(temp = (temp_c * (9/5)) + 32) |> 
-  
-  #renaming resp
-  rename(resp = respiratory_rate) |> 
-  
-  # Quick min/max for duplicates at the SAME time
-  dplyr::select(-obs) |> 
-  distinct() 
+  mutate(temp = (temp_c * (9 / 5)) + 32) |>
+  rename(resp = respiratory_rate) |>
+  dplyr::select(-obs) |>
+  distinct()
 
-# find the duplicates by day
 df_laps2_vitals_prep2 <- df_laps2_vitals_prep1 |>
   arrange(hospitalization_id, recorded_dttm) |>
-  mutate(vital_date = date(recorded_dttm)) |> 
+  mutate(vital_date = date(recorded_dttm)) |>
   group_by(hospitalization_id, vital_date) |>
-  # mutate(n = n()) |>
-  # filter(n > 1) |>
   summarise(
-    temp                = fmin(temp, na.rm = TRUE),
-    sbp                 = fmin(sbp, na.rm = TRUE),
-    spo2                = fmin(spo2, na.rm = TRUE),
-    heart_rate               = fmax(heart_rate, na.rm = TRUE),
-    resp                = fmax(resp, na.rm = TRUE),
-    gcs                 = fmax(gcs, na.rm = TRUE),  # remember the groupings... higher is lower gcs
-    # shock_index         = fmax(shock_index, na.rm = TRUE),  # do this after
-
-    .groups = "drop"
-  ) |> 
-  mutate(
-    shock_index = heart_rate / sbp
-  ) |> 
-  # replace inf with NAs
-  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-
-  # get rid of duplicate rows
-  distinct() 
-
-# LAPS2 Score Part 8: Day One Vitals for Cohort
-
-df_laps2_vitals_dayone_prep1 <- 
-  df_encounter_laps2_temp1 |> 
-  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, dt_24hours_after_admit) |>
-  distinct() |> 
-  left_join(df_vitals_gcs,
-            
-            # join only if between the first 24 hours
-            by = join_by(hospitalization_id, 
-                         dt_24hours_after_admit >= recorded_dttm)
-  ) |> 
-  
-    group_by(hospitalization_id, recorded_dttm, vital_category) |> 
-  # using obs lets you get away with duplicates when going wider and can fix later!
-  mutate(obs = row_number()) |> 
-  ungroup() |> 
-  pivot_wider(
-    id_cols = c(hospitalization_id, recorded_dttm, obs, admission_dttm),
-    names_from = vital_category,
-    values_from = vital_value,
-    # names_prefix = "vital_wide_",
-    # values_fill = NA
+    temp       = fmin(temp, na.rm = TRUE),
+    sbp        = fmin(sbp, na.rm = TRUE),
+    spo2       = fmin(spo2, na.rm = TRUE),
+    heart_rate = fmax(heart_rate, na.rm = TRUE),
+    resp       = fmax(resp, na.rm = TRUE),
+    gcs        = fmax(gcs, na.rm = TRUE),
+    .groups    = "drop"
   ) |>
-  
-  #fixing temp 
-  mutate(temp = (temp_c * (9/5)) + 32) |> 
-  
-  #renaming resp
-  rename(resp = respiratory_rate) |> 
+  mutate(shock_index = heart_rate / sbp) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct()
 
-  # Quick min/max for duplicates at the SAME time
-  dplyr::select(-obs) |> 
 
-  distinct() 
+# LAPS2 Score Part 8: Vitals in 24h Window BEFORE ICU Admission
+# -------------------------------------------------------------------
+# Was dt_24hours_after_admit >= recorded_dttm (24h after hospital admit)
+#         Now:  icu_admission_dttm   >= recorded_dttm
+#           AND dt_24hours_before_icu <= recorded_dttm
+# -------------------------------------------------------------------
 
-# find the duplicates by day
+df_laps2_vitals_dayone_prep1 <-
+  df_encounter_laps2_temp1 |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm,
+                icu_admission_dttm, dt_24hours_before_icu) |>   # CHANGE: ICU window cols
+  distinct() |>
+  left_join(
+    df_vitals_gcs,
+
+    # CHANGE: 24h window before ICU admission
+    by = join_by(
+      hospitalization_id,
+      icu_admission_dttm    >= recorded_dttm,
+      dt_24hours_before_icu <= recorded_dttm
+    )
+  ) |>
+  group_by(hospitalization_id, recorded_dttm, vital_category) |>
+  mutate(obs = row_number()) |>
+  ungroup() |>
+  pivot_wider(
+    id_cols     = c(hospitalization_id, recorded_dttm, obs, admission_dttm, icu_admission_dttm),  # CHANGE: keep icu_admission_dttm
+    names_from  = vital_category,
+    values_from = vital_value
+  ) |>
+  mutate(temp = (temp_c * (9 / 5)) + 32) |>
+  rename(resp = respiratory_rate) |>
+  dplyr::select(-obs) |>
+  distinct()
+
 df_laps2_vitals_dayone_prep2 <- df_laps2_vitals_dayone_prep1 |>
   arrange(hospitalization_id, recorded_dttm) |>
-  
-  # filter out those without a recorded_dttm so we don't add a date later
-  filter(!is.na(recorded_dttm)) |> 
-  
-  # if we make "lab_date" the encounter date... then we are switching all labs within 24hr of admission to the "day 1" in a sneaky fashion
-  #using encounter admit date to collect everything together
-  mutate(vital_date = date(admission_dttm)) |> 
+  filter(!is.na(recorded_dttm)) |>
+
+  # CHANGE: Anchor vital_date to ICU admission date (was admission_dttm)
+  mutate(vital_date = date(icu_admission_dttm)) |>
+
   group_by(hospitalization_id, vital_date) |>
-  # mutate(n = n()) |>
-  # filter(n > 1) |>
   summarise(
-    temp                = fmin(temp, na.rm = TRUE),
-    sbp                 = fmin(sbp, na.rm = TRUE),
-    spo2                = fmin(spo2, na.rm = TRUE),
-    heart_rate          = fmax(heart_rate, na.rm = TRUE),
-    resp                = fmax(resp, na.rm = TRUE),
-    gcs                 = fmax(gcs, na.rm = TRUE),
-    # shock_index         = fmax(shock_index, na.rm = TRUE),  # do this after
+    temp       = fmin(temp, na.rm = TRUE),
+    sbp        = fmin(sbp, na.rm = TRUE),
+    spo2       = fmin(spo2, na.rm = TRUE),
+    heart_rate = fmax(heart_rate, na.rm = TRUE),
+    resp       = fmax(resp, na.rm = TRUE),
+    gcs        = fmax(gcs, na.rm = TRUE),
+    .groups    = "drop"
+  ) |>
+  mutate(shock_index = heart_rate / sbp) |>
+  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |>
+  distinct()
 
-    .groups = "drop"
-  ) |> 
-  mutate(
-    shock_index         = heart_rate / sbp
-  ) |> 
-  
-  # replace inf with NAs
-  mutate(across(where(is.numeric) & !c(hospitalization_id), ~ na_if(.x, is.infinite(.x)))) |> 
-
-  # get rid of duplicate rows
-  distinct() 
-
-# switch out the day 1 stuff 
-df_laps2_vitals_final <- df_laps2_vitals_prep2 |> anti_join(df_laps2_vitals_dayone_prep2 |> 
-                              dplyr::select(hospitalization_id, vital_date)) |> 
-  bind_rows(df_laps2_vitals_dayone_prep2) |> 
-  arrange(hospitalization_id, vital_date) |> 
-  
-  # drop rows with no recorded date
+# Swap in the ICU-anchored day-one vitals
+df_laps2_vitals_final <- df_laps2_vitals_prep2 |>
+  anti_join(df_laps2_vitals_dayone_prep2 |> dplyr::select(hospitalization_id, vital_date)) |>
+  bind_rows(df_laps2_vitals_dayone_prep2) |>
+  arrange(hospitalization_id, vital_date) |>
   filter(!is.na(vital_date))
 
 
-# LAPS 2 Score Part 9: Calculate Laps2 Score
-
+# LAPS2 Score Part 9: Calculate LAPS2 Score
 setDT(df_pre_laps_final)
 df_pre_laps_final_cohort <- df_pre_laps_final[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 
-df_laps_calc <- df_laps2_final |> 
-  # get same naming for date
-  rename(recorded_date = lab_date) |> 
-  full_join(df_laps2_vitals_final |> 
-              rename(recorded_date = vital_date),
-            join_by(hospitalization_id, recorded_date)
-            ) |> 
+df_laps_calc <- df_laps2_final |>
+  rename(recorded_date = lab_date) |>
+  full_join(
+    df_laps2_vitals_final |> rename(recorded_date = vital_date),
+    join_by(hospitalization_id, recorded_date)
+  ) |>
   full_join(df_pre_laps_final_cohort)
-  
-clif_laps2_scores <- df_laps_calc |> 
-  group_by(hospitalization_id, recorded_date) |> 
-  
-  mutate(laps2 = 0) |> 
-  
-  mutate(
-    # lactic_acid and pH 
-    laps2 = fcase(
-      
-      # missing data
-      is.na(ph_arterial)  & is.na(lactic_acid) & high_risk == 0 , laps2 + 0,
-      is.na(ph_arterial)  & is.na(lactic_acid) & high_risk == 1 , laps2 + 15,
-      is.na(ph_arterial)  & lactic_acid < 2    & high_risk == 0 , laps2 + 0,
-      is.na(ph_arterial)  & lactic_acid < 2    & high_risk == 1 , laps2 + 12,
-      is.na(ph_arterial)  & lactic_acid >= 2   & lactic_acid < 4    & high_risk == 0 , laps2 + 12,
-      is.na(ph_arterial)  & lactic_acid >= 2   & lactic_acid < 4    & high_risk == 1 , laps2 + 15,
-      is.na(ph_arterial)  & lactic_acid >= 4   & high_risk == 0 , laps2 + 26,
-      is.na(ph_arterial)  & lactic_acid >= 4   & high_risk == 1 , laps2 + 30,
-      ph_arterial < 7.2   & is.na(lactic_acid) & high_risk == 0 , laps2 + 13,
-      ph_arterial < 7.2   & is.na(lactic_acid) & high_risk == 1 , laps2 + 19,
-      ph_arterial >= 7.2  & ph_arterial < 7.35 & is.na(lactic_acid) & high_risk == 0 , laps2 + 5,
-      ph_arterial >= 7.2  & ph_arterial < 7.35 & is.na(lactic_acid) & high_risk == 1 , laps2 + 15,
-      ph_arterial >= 7.35 & ph_arterial < 7.45 & is.na(lactic_acid) & high_risk == 0 , laps2 + 0,
-      ph_arterial >= 7.35 & ph_arterial < 7.45 & is.na(lactic_acid) & high_risk == 1 , laps2 + 12,
-      ph_arterial >= 7.45 & is.na(lactic_acid) & high_risk == 0 , laps2 + 12,
-      ph_arterial >= 7.45 & is.na(lactic_acid) & high_risk == 1 , laps2 + 15,
 
-      # complete data
-      ph_arterial < 7.2 &   lactic_acid <  2, laps2 + 13,
-      ph_arterial < 7.2 &   lactic_acid >= 2 & lactic_acid <  4, laps2 + 19,
-      ph_arterial < 7.2 &   lactic_acid >= 4, laps2 + 34,
-      ph_arterial >= 7.2 &  ph_arterial < 7.35 & lactic_acid <  2, laps2 + 5,
-      ph_arterial >= 7.2 &  ph_arterial < 7.35 & lactic_acid >= 2 & lactic_acid < 4, laps2 + 15,
-      ph_arterial >= 7.2 &  ph_arterial < 7.35 & lactic_acid >= 4, laps2 + 25,
-      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid <  2, laps2 + 0,
-      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid >= 2 & lactic_acid < 4, laps2 + 12,
-      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid >= 4, laps2 + 26,
-      ph_arterial >= 7.45 & lactic_acid <  2, laps2 + 12,
-      ph_arterial >= 7.45 & lactic_acid >= 2   & lactic_acid <  4, laps2 + 15,
-      ph_arterial >= 7.45 & lactic_acid >= 4, laps2 + 30,
-      default                                                                       = laps2
-      ),
-    
+clif_laps2_scores <- df_laps_calc |>
+  group_by(hospitalization_id, recorded_date) |>
+
+  mutate(laps2 = 0) |>
+
+  mutate(
+    # Lactic Acid and pH
+    laps2 = fcase(
+      is.na(ph_arterial) & is.na(lactic_acid) & high_risk == 0,                                    laps2 + 0,
+      is.na(ph_arterial) & is.na(lactic_acid) & high_risk == 1,                                    laps2 + 15,
+      is.na(ph_arterial) & lactic_acid < 2    & high_risk == 0,                                    laps2 + 0,
+      is.na(ph_arterial) & lactic_acid < 2    & high_risk == 1,                                    laps2 + 12,
+      is.na(ph_arterial) & lactic_acid >= 2   & lactic_acid < 4 & high_risk == 0,                  laps2 + 12,
+      is.na(ph_arterial) & lactic_acid >= 2   & lactic_acid < 4 & high_risk == 1,                  laps2 + 15,
+      is.na(ph_arterial) & lactic_acid >= 4   & high_risk == 0,                                    laps2 + 26,
+      is.na(ph_arterial) & lactic_acid >= 4   & high_risk == 1,                                    laps2 + 30,
+      ph_arterial < 7.2  & is.na(lactic_acid) & high_risk == 0,                                    laps2 + 13,
+      ph_arterial < 7.2  & is.na(lactic_acid) & high_risk == 1,                                    laps2 + 19,
+      ph_arterial >= 7.2  & ph_arterial < 7.35 & is.na(lactic_acid) & high_risk == 0,              laps2 + 5,
+      ph_arterial >= 7.2  & ph_arterial < 7.35 & is.na(lactic_acid) & high_risk == 1,              laps2 + 15,
+      ph_arterial >= 7.35 & ph_arterial < 7.45 & is.na(lactic_acid) & high_risk == 0,              laps2 + 0,
+      ph_arterial >= 7.35 & ph_arterial < 7.45 & is.na(lactic_acid) & high_risk == 1,              laps2 + 12,
+      ph_arterial >= 7.45 & is.na(lactic_acid) & high_risk == 0,                                   laps2 + 12,
+      ph_arterial >= 7.45 & is.na(lactic_acid) & high_risk == 1,                                   laps2 + 15,
+      ph_arterial < 7.2  & lactic_acid <  2,                                                        laps2 + 13,
+      ph_arterial < 7.2  & lactic_acid >= 2 & lactic_acid < 4,                                     laps2 + 19,
+      ph_arterial < 7.2  & lactic_acid >= 4,                                                        laps2 + 34,
+      ph_arterial >= 7.2  & ph_arterial < 7.35 & lactic_acid <  2,                                 laps2 + 5,
+      ph_arterial >= 7.2  & ph_arterial < 7.35 & lactic_acid >= 2 & lactic_acid < 4,               laps2 + 15,
+      ph_arterial >= 7.2  & ph_arterial < 7.35 & lactic_acid >= 4,                                 laps2 + 25,
+      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid <  2,                                 laps2 + 0,
+      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid >= 2 & lactic_acid < 4,               laps2 + 12,
+      ph_arterial >= 7.35 & ph_arterial < 7.45 & lactic_acid >= 4,                                 laps2 + 26,
+      ph_arterial >= 7.45 & lactic_acid <  2,                                                       laps2 + 12,
+      ph_arterial >= 7.45 & lactic_acid >= 2   & lactic_acid < 4,                                  laps2 + 15,
+      ph_arterial >= 7.45 & lactic_acid >= 4,                                                       laps2 + 30,
+      default                                                                                       = laps2
+    ),
+
     # Sodium
     laps2 = fcase(
-      is.na(sodium), laps2 + 0,
-      sodium <  129, laps2 + 14,
-      sodium >= 129 & sodium < 135, laps2 + 7,
-      sodium >= 135 & sodium < 146, laps2 + 0,
-      sodium >= 146, laps2 + 4,
-      default = laps2
-    ),
-    
-    # Bilirubin
-    laps2 = fcase(
-      is.na(bilirubin_total), laps2 + 0,
-      bilirubin_total <  2, laps2 + 0,
-      bilirubin_total >= 2 & bilirubin_total < 3, laps2 + 11,
-      bilirubin_total >= 3 & bilirubin_total < 5, laps2 + 18,
-      bilirubin_total >= 5 & bilirubin_total < 8, laps2 + 25,
-      bilirubin_total >= 8, laps2 + 41,
-      TRUE , laps2
-    ),
-    
-    # BUN
-    laps2 = fcase(
-      is.na(bun), laps2 + 0,
-      bun < 18, laps2 + 0,
-      bun >= 18 & bun < 20, laps2 + 11,
-      bun >= 20 & bun < 40, laps2 + 12,
-      bun >= 40 & bun < 80, laps2 + 20,
-      bun >= 80, laps2 + 25,
-      default = laps2
-    ),
-    
-    # Creatinine
-    laps2 = fcase(
-      is.na(creatinine), laps2 + 0,
-      creatinine < 1, laps2 + 0,
-      creatinine >= 1 & creatinine < 2, laps2 + 6,
-      creatinine >= 2 & creatinine < 4, laps2 + 11,
-      creatinine >= 4, laps2 + 5,
-      default = laps2
-    ),
-    
-    # BUN/Cr Ratio
-    laps2 = fcase(
-      is.na(bun_cr_ratio), laps2 + 0,
-      bun_cr_ratio < 25, laps2 + 0,
-      bun_cr_ratio >= 25, laps2 + 10,
-      default = laps2
-    ),
-    
-    # Albumin
-    laps2 = fcase(
-      is.na(albumin), laps2 + 0,
-      albumin < 2, laps2 + 31,
-      albumin >= 2 & albumin < 2.5, laps2 + 15,
-      albumin >= 2.5, laps2 + 0,
-      default = laps2
-    ),
-    
-    # glucose_serum
-    laps2 = fcase(
-      is.na(glucose_serum), laps2 + 0,
-      glucose_serum < 40, laps2 + 10,
-      glucose_serum >= 40 & glucose_serum < 60, laps2 + 10,
-      glucose_serum >= 60 & glucose_serum < 200, laps2 + 0,
-      glucose_serum >= 200, laps2 + 3,
-      default                                                                   = laps2
-    ),
-    
-    # Hematocrit (Hct)
-    laps2 = fcase(
-      is.na(hematocrit), laps2 + 0,
-      hematocrit < 20, laps2 + 7,
-      hematocrit >= 20 & hematocrit < 40, laps2 + 8,
-      hematocrit >= 40 & hematocrit < 50, laps2 + 0,
-      hematocrit >= 50, laps2 + 3,
-      default = laps2
-    ),
-    
-    # WBC
-    laps2 = fcase(
-      is.na(wbc) & high_risk == 0 , laps2 + 0,
-      is.na(wbc) & high_risk == 1 , laps2 + 32,
-      wbc < 5, laps2 + 8,
-      wbc >= 5 & wbc < 13, laps2 + 0,
-      wbc >= 13, laps2 + 11,
-      default = laps2
-    ),
-    
-  # pco2_arterial
-    laps2 = fcase(
-      is.na(pco2_arterial), laps2 + 0,
-      pco2_arterial < 35, laps2 + 7,
-      pco2_arterial >= 35 & pco2_arterial < 45, laps2 + 0,
-      pco2_arterial >= 45 & pco2_arterial < 55, laps2 + 11,
-      pco2_arterial >= 55 & pco2_arterial < 65, laps2 + 13,
-      pco2_arterial >= 65, laps2 + 12,
-      default = laps2
-    ),
-  
-  # po2_arterial
-    laps2 = fcase(
-      is.na(po2_arterial), laps2 + 0,
-      po2_arterial < 50, laps2 + 8,
-      po2_arterial >= 50 & po2_arterial < 120, laps2 + 0,
-      po2_arterial >= 120, laps2 + 12,
-      default = laps2
-    ),
-  
-  # Troponin
-    laps2 = fcase(
-      is.na(troponin)  & high_risk == 0 , laps2 + 0,
-      is.na(troponin)  & high_risk == 1 , laps2 + 9,
-      troponin <  0.01, laps2 + 0,
-      troponin >= 0.01 & troponin < 0.2, laps2 + 8,
-      troponin >= 0.2  & troponin < 1, laps2 + 17,
-      troponin >= 1    & troponin < 3, laps2 + 19,
-      troponin >= 3, laps2 + 25,
-      default = laps2
-    ),
-  
-  # Temp
-    laps2 = fcase(
-      is.na(temp), laps2 + 0,
-      temp < 96, laps2 + 20,
-      temp >= 96    & temp < 100.5, laps2 + 0,
-      temp >= 100.5, laps2 + 3,
-      default = laps2
+      is.na(sodium),                        laps2 + 0,
+      sodium <  129,                        laps2 + 14,
+      sodium >= 129 & sodium < 135,         laps2 + 7,
+      sodium >= 135 & sodium < 146,         laps2 + 0,
+      sodium >= 146,                        laps2 + 4,
+      default                              = laps2
     ),
 
-  # heart_rate
+    # Bilirubin
     laps2 = fcase(
-      is.na(heart_rate), laps2 + 0,
-      heart_rate < 60, laps2 + 7,
-      heart_rate >= 60  & heart_rate < 110, laps2 + 0,
-      heart_rate >= 110 & heart_rate < 140, laps2 + 7,
-      heart_rate >= 140, laps2 + 10,
-      default = laps2
+      is.na(bilirubin_total),                                         laps2 + 0,
+      bilirubin_total <  2,                                           laps2 + 0,
+      bilirubin_total >= 2 & bilirubin_total < 3,                     laps2 + 11,
+      bilirubin_total >= 3 & bilirubin_total < 5,                     laps2 + 18,
+      bilirubin_total >= 5 & bilirubin_total < 8,                     laps2 + 25,
+      bilirubin_total >= 8,                                           laps2 + 41,
+      TRUE,                                                           laps2
     ),
-  
-  # Resp
+
+    # BUN
     laps2 = fcase(
-      is.na(resp), laps2 + 0,
-      resp < 20, laps2 + 0,
-      resp >= 20 & resp < 30, laps2 + 11,
-      resp >= 30, laps2 + 21,
-      default = laps2
+      is.na(bun),                           laps2 + 0,
+      bun < 18,                             laps2 + 0,
+      bun >= 18 & bun < 20,                 laps2 + 11,
+      bun >= 20 & bun < 40,                 laps2 + 12,
+      bun >= 40 & bun < 80,                 laps2 + 20,
+      bun >= 80,                            laps2 + 25,
+      default                              = laps2
     ),
-    
-  # SBP
+
+    # Creatinine
     laps2 = fcase(
-      is.na(sbp), laps2 + 0,
-      sbp < 75, laps2 + 22,
-      sbp >= 75  & sbp < 90, laps2 + 13,
-      sbp >= 90  & sbp < 120, laps2 + 5,
-      sbp >= 120 & sbp < 140, laps2 + 0,
-      sbp >= 140 & sbp < 160, laps2 + 8,
-      sbp >= 160, laps2 + 14,
-      default = laps2
+      is.na(creatinine),                            laps2 + 0,
+      creatinine < 1,                               laps2 + 0,
+      creatinine >= 1 & creatinine < 2,             laps2 + 6,
+      creatinine >= 2 & creatinine < 4,             laps2 + 11,
+      creatinine >= 4,                              laps2 + 5,
+      default                                      = laps2
     ),
-  
-  # Shock
+
+    # BUN/Cr Ratio
     laps2 = fcase(
-      is.na(shock_index), laps2 + 0,
-      shock_index < 0.65, laps2 + 0,
-      shock_index >= 0.65 & shock_index < 0.85, laps2 + 8,
-      shock_index >= 0.85, laps2 + 17,
-      default = laps2
+      is.na(bun_cr_ratio),                  laps2 + 0,
+      bun_cr_ratio < 25,                    laps2 + 0,
+      bun_cr_ratio >= 25,                   laps2 + 10,
+      default                              = laps2
     ),
-  
-  # O2Sat
+
+    # Albumin
     laps2 = fcase(
-      is.na(spo2) & high_risk == 0 , laps2 + 0,
-      is.na(spo2) & high_risk == 1 , laps2 + 22,
-      spo2 <  90, laps2 + 22,
-      spo2 >= 90  & spo2 < 94, laps2 + 12,
-      spo2 >  94, laps2 + 0,
-      default = laps2
+      is.na(albumin),                               laps2 + 0,
+      albumin < 2,                                  laps2 + 31,
+      albumin >= 2 & albumin < 2.5,                 laps2 + 15,
+      albumin >= 2.5,                               laps2 + 0,
+      default                                      = laps2
     ),
-  
-  # Neuro (GCS)
+
+    # Glucose
     laps2 = fcase(
-      is.na(gcs) & high_risk == 0 , laps2 + 16,
-      is.na(gcs) & high_risk == 1 , laps2 + 21,
-      gcs == 1, laps2 + 0,
-      gcs == 2, laps2 + 16,
-      gcs == 3, laps2 + 21,
-      gcs == 4, laps2 + 36,
-      default = laps2
+      is.na(glucose_serum),                                     laps2 + 0,
+      glucose_serum < 40,                                       laps2 + 10,
+      glucose_serum >= 40 & glucose_serum < 60,                 laps2 + 10,
+      glucose_serum >= 60 & glucose_serum < 200,                laps2 + 0,
+      glucose_serum >= 200,                                     laps2 + 3,
+      default                                                  = laps2
+    ),
+
+    # Hematocrit
+    laps2 = fcase(
+      is.na(hematocrit),                                laps2 + 0,
+      hematocrit < 20,                                  laps2 + 7,
+      hematocrit >= 20 & hematocrit < 40,               laps2 + 8,
+      hematocrit >= 40 & hematocrit < 50,               laps2 + 0,
+      hematocrit >= 50,                                 laps2 + 3,
+      default                                          = laps2
+    ),
+
+    # WBC
+    laps2 = fcase(
+      is.na(wbc) & high_risk == 0,          laps2 + 0,
+      is.na(wbc) & high_risk == 1,          laps2 + 32,
+      wbc < 5,                              laps2 + 8,
+      wbc >= 5 & wbc < 13,                  laps2 + 0,
+      wbc >= 13,                            laps2 + 11,
+      default                              = laps2
+    ),
+
+    # PCO2 Arterial
+    laps2 = fcase(
+      is.na(pco2_arterial),                                         laps2 + 0,
+      pco2_arterial < 35,                                           laps2 + 7,
+      pco2_arterial >= 35 & pco2_arterial < 45,                     laps2 + 0,
+      pco2_arterial >= 45 & pco2_arterial < 55,                     laps2 + 11,
+      pco2_arterial >= 55 & pco2_arterial < 65,                     laps2 + 13,
+      pco2_arterial >= 65,                                          laps2 + 12,
+      default                                                      = laps2
+    ),
+
+    # PO2 Arterial
+    laps2 = fcase(
+      is.na(po2_arterial),                                  laps2 + 0,
+      po2_arterial < 50,                                    laps2 + 8,
+      po2_arterial >= 50 & po2_arterial < 120,              laps2 + 0,
+      po2_arterial >= 120,                                  laps2 + 12,
+      default                                              = laps2
+    ),
+
+    # Troponin
+    laps2 = fcase(
+      is.na(troponin) & high_risk == 0,             laps2 + 0,
+      is.na(troponin) & high_risk == 1,             laps2 + 9,
+      troponin <  0.01,                             laps2 + 0,
+      troponin >= 0.01 & troponin < 0.2,            laps2 + 8,
+      troponin >= 0.2  & troponin < 1,              laps2 + 17,
+      troponin >= 1    & troponin < 3,              laps2 + 19,
+      troponin >= 3,                                laps2 + 25,
+      default                                      = laps2
+    ),
+
+    # Temperature
+    laps2 = fcase(
+      is.na(temp),                          laps2 + 0,
+      temp < 96,                            laps2 + 20,
+      temp >= 96    & temp < 100.5,         laps2 + 0,
+      temp >= 100.5,                        laps2 + 3,
+      default                              = laps2
+    ),
+
+    # Heart Rate
+    laps2 = fcase(
+      is.na(heart_rate),                            laps2 + 0,
+      heart_rate < 60,                              laps2 + 7,
+      heart_rate >= 60  & heart_rate < 110,         laps2 + 0,
+      heart_rate >= 110 & heart_rate < 140,         laps2 + 7,
+      heart_rate >= 140,                            laps2 + 10,
+      default                                      = laps2
+    ),
+
+    # Respiratory Rate
+    laps2 = fcase(
+      is.na(resp),                          laps2 + 0,
+      resp < 20,                            laps2 + 0,
+      resp >= 20 & resp < 30,               laps2 + 11,
+      resp >= 30,                           laps2 + 21,
+      default                              = laps2
+    ),
+
+    # SBP
+    laps2 = fcase(
+      is.na(sbp),                           laps2 + 0,
+      sbp < 75,                             laps2 + 22,
+      sbp >= 75  & sbp < 90,               laps2 + 13,
+      sbp >= 90  & sbp < 120,              laps2 + 5,
+      sbp >= 120 & sbp < 140,              laps2 + 0,
+      sbp >= 140 & sbp < 160,              laps2 + 8,
+      sbp >= 160,                           laps2 + 14,
+      default                              = laps2
+    ),
+
+    # Shock Index
+    laps2 = fcase(
+      is.na(shock_index),                                   laps2 + 0,
+      shock_index < 0.65,                                   laps2 + 0,
+      shock_index >= 0.65 & shock_index < 0.85,             laps2 + 8,
+      shock_index >= 0.85,                                  laps2 + 17,
+      default                                              = laps2
+    ),
+
+    # SpO2
+    laps2 = fcase(
+      is.na(spo2) & high_risk == 0,         laps2 + 0,
+      is.na(spo2) & high_risk == 1,         laps2 + 22,
+      spo2 <  90,                           laps2 + 22,
+      spo2 >= 90  & spo2 < 94,             laps2 + 12,
+      spo2 >  94,                           laps2 + 0,
+      default                              = laps2
+    ),
+
+    # Neuro (GCS)
+    laps2 = fcase(
+      is.na(gcs) & high_risk == 0,          laps2 + 16,
+      is.na(gcs) & high_risk == 1,          laps2 + 21,
+      gcs == 1,                             laps2 + 0,
+      gcs == 2,                             laps2 + 16,
+      gcs == 3,                             laps2 + 21,
+      gcs == 4,                             laps2 + 36,
+      default                              = laps2
     )
   )
 
 
-# LAPS2 Score Final:
-
+# LAPS2 Score Final: Match LAPS2 to IMV Run
 final_cohort_imv_runs[, imv_date := as.Date(begin_imv)]
 setDT(clif_laps2_scores)
 
-# Step 1: Prioritize Exact Match of imv_date and recorded_date
+# Step 1: Exact match on IMV date and recorded date
 exact_match <- merge(
   final_cohort_imv_runs,
   clif_laps2_scores,
@@ -3365,80 +3134,93 @@ exact_match <- merge(
   all.x = TRUE
 )
 
-# Step 2: For unmatched rows, do rolling join with preference for earlier dates
-unmatched <- exact_match[is.na(high_risk)]  
+# Step 2: Rolling join for unmatched rows (prefer nearest earlier date)
+unmatched <- exact_match[is.na(high_risk)]
 
-# Join using rolling method (prefer earlier)
 setkey(clif_laps2_scores, hospitalization_id, recorded_date)
 setkey(unmatched, hospitalization_id, imv_date)
 
 roll_join <- clif_laps2_scores[unmatched, roll = -Inf, on = .(hospitalization_id, recorded_date = imv_date)]
 
-# Final: Combine the matched and rolled
-final_cohort_imv_runs_merge <- rbindlist(list(
-  exact_match[!is.na(high_risk)],
-  roll_join
-), use.names = TRUE, fill = TRUE)
+# Final: Combine matched and rolled
+final_cohort_imv_runs_merge <- rbindlist(
+  list(exact_match[!is.na(high_risk)], roll_join),
+  use.names = TRUE,
+  fill      = TRUE
+)
 
-#LAPS2 MISSING DATA SUMMARY 
 
-# Step 1: Flag hospitalizations missing data for each SOFA component
+# LAPS2 Missing Data Summary
+
 laps2_missing_summary <- final_cohort_imv_runs_merge %>%
   group_by(hospitalization_id) %>%
   summarise(
-    missing_sodium = all(is.na(sodium)),
-    missing_bili = all(is.na(bilirubin_total)),
-    missing_bun = all(is.na(bun)),
-    missing_creat = all(is.na(creatinine)),
+    missing_sodium      = all(is.na(sodium)),
+    missing_bili        = all(is.na(bilirubin_total)),
+    missing_bun         = all(is.na(bun)),
+    missing_creat       = all(is.na(creatinine)),
     missing_bun_cr_ratio = all(is.na(bun_cr_ratio)),
-    missing_albumin = all(is.na(albumin)),
-    missing_gluc = all(is.na(glucose_serum)),
-    missing_hct = all(is.na(hematocrit)),
-    missing_wbc = all(is.na(wbc)),
-    missing_pco2 = all(is.na(pco2_arterial)),
-    missing_po2 = all(is.na(po2_arterial)),
-    missing_trop = all(is.na(troponin)),
-    missing_temp = all(is.na(temp)),
-    missing_hr = all(is.na(heart_rate)),
-    missing_resp = all(is.na(resp)),
-    missing_sbp = all(is.na(sbp)),
+    missing_albumin     = all(is.na(albumin)),
+    missing_gluc        = all(is.na(glucose_serum)),
+    missing_hct         = all(is.na(hematocrit)),
+    missing_wbc         = all(is.na(wbc)),
+    missing_pco2        = all(is.na(pco2_arterial)),
+    missing_po2         = all(is.na(po2_arterial)),
+    missing_trop        = all(is.na(troponin)),
+    missing_temp        = all(is.na(temp)),
+    missing_hr          = all(is.na(heart_rate)),
+    missing_resp        = all(is.na(resp)),
+    missing_sbp         = all(is.na(sbp)),
     missing_shock_index = all(is.na(shock_index)),
-    missing_spo2 = all(is.na(spo2)),
-    missing_gcs = all(is.na(gcs)),
-    .groups = "drop"
+    missing_spo2        = all(is.na(spo2)),
+    missing_gcs         = all(is.na(gcs)),
+    .groups             = "drop"
   )
 
-# Step 2: Calculate percent missing
 laps2_missing_percent <- laps2_missing_summary %>%
   summarise(
-    pct_missing_sodium = mean(missing_sodium) * 100,
-    pct_missing_bili = mean(missing_bili) * 100,
-    pct_missing_bun = mean(missing_bun) * 100,
-    pct_missing_creat = mean(missing_creat) * 100,
+    pct_missing_sodium      = mean(missing_sodium) * 100,
+    pct_missing_bili        = mean(missing_bili) * 100,
+    pct_missing_bun         = mean(missing_bun) * 100,
+    pct_missing_creat       = mean(missing_creat) * 100,
     pct_missing_bun_cr_ratio = mean(missing_bun_cr_ratio) * 100,
-    pct_missing_albumin = mean(missing_albumin) * 100,
-    pct_missing_gluc = mean(missing_gluc) * 100,
-    pct_missing_hct = mean(missing_hct) * 100,
-    pct_missing_wbc = mean(missing_wbc) * 100,
-    pct_missing_pco2 = mean(missing_pco2) * 100,
-    pct_missing_po2 = mean(missing_po2) * 100,
-    pct_missing_trop = mean(missing_trop) * 100,
-    pct_missing_temp = mean(missing_temp) * 100,
-    pct_missing_hr = mean(missing_hr) * 100,
-    pct_missing_resp = mean(missing_resp) * 100,
-    pct_missing_sbp = mean(missing_sbp) * 100,
+    pct_missing_albumin     = mean(missing_albumin) * 100,
+    pct_missing_gluc        = mean(missing_gluc) * 100,
+    pct_missing_hct         = mean(missing_hct) * 100,
+    pct_missing_wbc         = mean(missing_wbc) * 100,
+    pct_missing_pco2        = mean(missing_pco2) * 100,
+    pct_missing_po2         = mean(missing_po2) * 100,
+    pct_missing_trop        = mean(missing_trop) * 100,
+    pct_missing_temp        = mean(missing_temp) * 100,
+    pct_missing_hr          = mean(missing_hr) * 100,
+    pct_missing_resp        = mean(missing_resp) * 100,
+    pct_missing_sbp         = mean(missing_sbp) * 100,
     pct_missing_shock_index = mean(missing_shock_index) * 100,
-    pct_missing_spo2 = mean(missing_spo2) * 100,
-    pct_missing_gcs = mean(missing_gcs) * 100
+    pct_missing_spo2        = mean(missing_spo2) * 100,
+    pct_missing_gcs         = mean(missing_gcs) * 100
   )
 
-final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted, deep_sedation_unweighted, rass_weighted_avg, rass_below_minus_3_count, median_rass_binary, median_rass_cont, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours)]
+final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(
+  hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final,
+  admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id,
+  icu_imv, hospital_icu_id, location_of_intubation, first_location_category,
+  age_at_admission, age_category, admission_type_category, discharge_category,
+  sex_category, race_category, ethnicity_category, ethnicity_category_final,
+  SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height,
+  bmi, trached, reintubation_final, mortality_28day, death_during_admission,
+  hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28,
+  vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted,
+  deep_sedation_unweighted, rass_weighted_avg, rass_below_minus_3_count,
+  median_rass_binary, median_rass_cont, sedation_index_score,
+  rass_frequency_hrs, time_from_begin_imv_to_icu_hours
+)]
 
-# Save the Missing results to a file
-fwrite(laps2_missing_percent, file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
+# Save missing data summary
+fwrite(laps2_missing_percent,
+       file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
 
-#Save Point
-#write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
+# Save Point
+# write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
 ```
 
 # PART FIVE: Calculate Med Doses, Paralytics, etc in First 48 hours of IMV
@@ -5675,7 +5457,7 @@ ketamine_total_48h <- safe_med_eval({
     empty_med_table(c(
       "hospitalization_id",
       "ketamine_total_48",
-      "ketamine_avg_mghr_48"
+      "ketamine_avg_mgkghr_48"
     ))
     
   } else {
@@ -5706,6 +5488,18 @@ ketamine_total_48h <- safe_med_eval({
     
     ketamine_expanded <- ketamine_expanded[!is.na(med_dose)]
     
+    # normalize units
+    ketamine_expanded[, med_dose_unit := trimws(tolower(med_dose_unit))]
+    
+    # convert mcg/kg/hr to mg/kg/hr if it appears
+    ketamine_expanded[
+      med_dose_unit == "mcg/kg/hr",
+      `:=`(
+        med_dose = med_dose / 1000,
+        med_dose_unit = "mg/kg/hr"
+      )
+    ]
+    
     # If merge/filter leaves no usable rows, return empty shells
     if (nrow(ketamine_expanded) == 0) {
       
@@ -5717,7 +5511,7 @@ ketamine_total_48h <- safe_med_eval({
       empty_med_table(c(
         "hospitalization_id",
         "ketamine_total_48",
-        "ketamine_avg_mghr_48"
+        "ketamine_avg_mgkghr_48"
       ))
       
     } else {
@@ -5745,7 +5539,7 @@ ketamine_total_48h <- safe_med_eval({
       # ---------------------------
       # Split infusion vs bolus
       # ---------------------------
-      inf <- DTketa[med_dose_unit == "mg/hr"]
+      inf <- DTketa[med_dose_unit == "mg/kg/hr"]
       setorder(inf, hospitalization_id, admin_dttm)
       
       bolus <- DTketa[med_dose_unit == "mg"]
@@ -5795,8 +5589,10 @@ ketamine_total_48h <- safe_med_eval({
       )]
       inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
       
-      # integrate: mg/hr -> mg/min -> mg
-      inf2[, ketamine_rate_mg_min := med_dose / 60]
+      # integrate:
+      # mg/kg/hr * kg = mg/hr
+      # mg/hr / 60 = mg/min
+      inf2[, ketamine_rate_mg_min := (med_dose * weight_kg) / 60]
       inf2[, infusion_mg := ketamine_rate_mg_min * duration_min]
       
       inf_48 <- inf2[
@@ -5846,12 +5642,13 @@ ketamine_total_48h <- safe_med_eval({
         ketamine_total_48
       )]
       
-      # Merge in duration
+      # Merge in duration and weight
       ketamine_total_48h <- merge(
         ketamine_total_48h,
         final_cohort_imv_runs[, .(
           hospitalization_id,
-          imv_duration_hours_final
+          imv_duration_hours_final,
+          weight_kg
         )],
         by = "hospitalization_id",
         all.x = TRUE
@@ -5864,14 +5661,19 @@ ketamine_total_48h <- safe_med_eval({
         default = imv_duration_hours_final
       )]
       
-      # Average mg/hr
-      ketamine_total_48h[, ketamine_avg_mghr_48 := ketamine_total_48 / imv_hours_capped]
-      ketamine_total_48h[imv_hours_capped <= 0, ketamine_avg_mghr_48 := NA_real_]
+      # Average mg/kg/hr
+      ketamine_total_48h[, ketamine_avg_mgkghr_48 :=
+        ketamine_total_48 / (weight_kg * imv_hours_capped)
+      ]
+      ketamine_total_48h[
+        weight_kg <= 0 | imv_hours_capped <= 0,
+        ketamine_avg_mgkghr_48 := NA_real_
+      ]
       
       ketamine_total_48h[, .(
         hospitalization_id,
         ketamine_total_48,
-        ketamine_avg_mghr_48
+        ketamine_avg_mgkghr_48
       )]
     }
   }
@@ -5880,7 +5682,7 @@ ketamine_total_48h <- safe_med_eval({
 empty_cols = c(
   "hospitalization_id",
   "ketamine_total_48",
-  "ketamine_avg_mghr_48"
+  "ketamine_avg_mgkghr_48"
 ),
 med_name = "ketamine")
 ###############################################################################
@@ -6591,21 +6393,21 @@ summary_meds_data_final <- summary_meds_data[, .(hospitalization_id, propofol_av
 ```
 
 
-# PART SIX: Identify acute respiratory failure patients, % deep sedation
+# PART SIX: Identify acute respiratory failure patients
 ```{r}
 
 # Identify Patients with Acute Respiratory Failure in the 24 hours prior to IMV
 # Find SpO2 and RR values from the 24 hours prior to IMV
-#Vitals for just required hospitalization_ids
+# Vitals for just required hospitalization_ids
 resp_vital_categories <- c("spo2", "respiratory_rate")
 vitals_resp <- vitals_time_dependent[vital_category %in% resp_vital_categories]
 resp_values <- vitals_resp[hospitalization_id %in% final_cohort_imv_runs_reduced$hospitalization_id]
 
-#Merge vital values and part_one_imv_runs
-merged_resp_values <- merge(resp_values, final_cohort_imv_runs_reduced, by = "hospitalization_id", , all = TRUE)
+# Merge vital values and final_imv_runs
+merged_resp_values <- merge(resp_values, final_cohort_imv_runs_reduced, by = "hospitalization_id", , all.x = TRUE)
 setorder(merged_resp_values, hospitalization_id, recorded_dttm)
 
-#Filter for 24-hour pre IMV window values
+# Filter for 24-hour pre IMV window values
 merged_resp_values_24h <- merged_resp_values %>%
   filter(recorded_dttm >= (begin_imv - lubridate::hours(24)) &
          recorded_dttm <= begin_imv)
@@ -6616,7 +6418,7 @@ merged_resp_values_24h_final_dedup <- merged_resp_values_24h_final[
   by = .(hospitalization_id, recorded_dttm, vital_category)
 ]
 
-#Pivot Long to Wide
+# Pivot Long to Wide
 resp_wide <- merged_resp_values_24h_final_dedup %>%
   tidyr::pivot_wider(
     id_cols   = c(hospitalization_id, recorded_dttm),
@@ -6624,32 +6426,32 @@ resp_wide <- merged_resp_values_24h_final_dedup %>%
     values_from = vital_value
   )
 
-#Find respiratory support values from the 24 hours prior to IMV
-#Resp_supp just for the required hospitalization_ids
+# Find respiratory support values from the 24 hours prior to IMV
+# Resp_supp just for the required hospitalization_ids
 respiratory_support_part_three <- respiratory_support[, .(hospitalization_id, recorded_dttm, device_category, fio2_set, lpm_set)][hospitalization_id %in% final_cohort_imv_runs_reduced$hospitalization_id]
 
-#Merge resp_supp and final_cohort_imv_runs_reduced
+# Merge resp_supp and final_cohort_imv_runs_reduced
 resp_supp_three_merge <- merge(respiratory_support_part_three, final_cohort_imv_runs_reduced, by = "hospitalization_id", all = TRUE)
 setorder(resp_supp_three_merge, hospitalization_id, recorded_dttm)
 
-#Filter for the 24 hours prior to starting IMV
+# Filter for the 24 hours prior to starting IMV
 resp_supp_three_merge_24h <- resp_supp_three_merge %>%
   filter(recorded_dttm >= (begin_imv - lubridate::hours(24)) &
          recorded_dttm <= begin_imv)
 setorder(resp_supp_three_merge_24h, hospitalization_id, recorded_dttm)
 resp_supp_three_merge_24h_final <- resp_supp_three_merge_24h[, .(hospitalization_id, recorded_dttm, device_category, fio2_set, lpm_set)]
 
-#Find Labs from the 24 hours prior to IMV
-#Labs for just the required hosp_ids
+# Find Labs from the 24 hours prior to IMV
+# Labs for just the required hosp_ids
 resp_labs_categories <- c("pco2_venous", "pco2_arterial", "ph_venous", "ph_arterial")
 labs_resp <- labs_time_dependent[lab_category %in% resp_labs_categories]
 labs_resp_filt <- labs_resp[hospitalization_id %in% final_cohort_imv_runs_reduced$hospitalization_id]
 
-#Merge with Final_cohort_imv_runs
+# Merge with Final_cohort_imv_runs
 merged_labs_resp <- merge(labs_resp_filt, final_cohort_imv_runs_reduced, by = "hospitalization_id", all = TRUE)
 setorder(merged_labs_resp, hospitalization_id, lab_result_dttm)
 
-#Filter for the 24 hours prior to starting IMV
+# Filter for the 24 hours prior to starting IMV
 merged_labs_values_24h <- merged_labs_resp %>%
   filter(lab_result_dttm >= (begin_imv - lubridate::hours(24)) &
          lab_result_dttm <= begin_imv)
@@ -6662,7 +6464,7 @@ merged_labs_values_24h_final_dedup <- merged_labs_values_24h_final[
   by = .(hospitalization_id, recorded_dttm, lab_category)
 ]
 
-#Pivot Long to Wide
+# Pivot Long to Wide
 labs_wide <- merged_labs_values_24h_final_dedup %>%
   tidyr::pivot_wider(
     id_cols   = c(hospitalization_id, recorded_dttm),
@@ -6670,86 +6472,86 @@ labs_wide <- merged_labs_values_24h_final_dedup %>%
     values_from = lab_value_numeric
   )
 
-#Clean Up and Merge the Three Time Filtered Tables
+# Clean Up and Merge the Three Time Filtered Tables
 merged_all <- resp_supp_three_merge_24h_final %>%
   dplyr::full_join(labs_wide,
                    by = c("hospitalization_id", "recorded_dttm")) %>%
-  dplyr::full_join(resp_wide,
+  dplyr::full_join(resp_wide, #Respiratory vitals
                    by = c("hospitalization_id", "recorded_dttm"))
 
 
-#Use LOCF to fill out spo2, device_category, and pco2
+# Use LOCF to fill out spo2, device_category, and pco2
 merged_all_locf <- merged_all %>%
   arrange(hospitalization_id, recorded_dttm) %>%
   group_by(hospitalization_id) %>%
   fill(spo2, pco2_arterial, pco2_venous, device_category, .direction = "down") %>%  # LOCF
   ungroup()
 
-#Criteria #1: Single O2 Saturation value of less than ore equal to 85% while on supplemental O2
-#Create flag for rows where spo2 values are =<85%
+# Criteria #1: Single O2 Saturation value of less than or equal to 85% while on supplemental O2
+#   Create flag for rows where spo2 values are =<85%
 merged_all_locf <- merged_all_locf %>%
   mutate(spo2_low_flag = if_else(spo2 <= 85, TRUE, FALSE, missing = FALSE))
 
-#Create flag for rows where device_category is something other than "room air"
+# Create flag for rows where device_category is something other than "room air"
 merged_all_locf <- merged_all_locf %>%
   mutate(device_support_flag = if_else(!is.na(device_category) & device_category != "room air",
                                        TRUE, FALSE))
 
-#Create flag for rows that have BOTH the spo2_flag and the non_ra flag
+# Create flag for rows that have BOTH the spo2_flag and the non_ra flag
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_one_flag = if_else(spo2_low_flag & device_support_flag, TRUE, FALSE))
 
-#Criteria #2: Receipt of supplemental O2 >= 6 LPM or >= 40% FiO2 on two distinct measurements
-#Flag for hospitalization_ids with 2 or more lpm_set values >= 6
+# Criteria #2: Receipt of supplemental O2 >= 6 LPM or >= 40% FiO2 on two distinct measurements
+#   Flag for hospitalization_ids with 2 or more lpm_set values >= 6
 merged_all_locf <- merged_all_locf %>%
   group_by(hospitalization_id) %>%
   mutate(criteria_two_flow_flag = sum(lpm_set >= 6, na.rm = TRUE) >= 2) %>%
   ungroup()
 
-#Flag for hospitalization_ids with 2 or more fio2_set values >= 40
+# Flag for hospitalization_ids with 2 or more fio2_set values >= 40
 merged_all_locf <- merged_all_locf %>%
   group_by(hospitalization_id) %>%
   mutate(criteria_two_fio2_flag = sum(fio2_set >= 0.40, na.rm = TRUE) >= 2) %>%
   ungroup()
 
-#Criteria #3: Arterial pCO2 >45 and respiratory_rate >= 22 or venous pCO2 >50 and respiratory rate >= 22
-#Arterial Flag
+# Criteria #3: Arterial pCO2 >45 and respiratory_rate >= 22 or venous pCO2 >50 and respiratory rate >= 22
+#   Arterial Flag
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_three_arterial_flag = if_else(
     pco2_arterial > 45 & respiratory_rate >= 22,
     TRUE, FALSE, missing = FALSE
   ))
 
-#Venous Flag
+# Venous Flag
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_three_venous_flag = if_else(
     pco2_venous > 50 & respiratory_rate >= 22,
     TRUE, FALSE, missing = FALSE
   ))
 
-#Criteria #4: Arterial pCO2 >60 mmHg and pH =< 7.3 or venous pCO2 >65 mmHg and pH =< 7.3
-#Arterial Flag
+# Criteria #4: Arterial pCO2 >60 mmHg and pH =< 7.3 or venous pCO2 >65 mmHg and pH =< 7.3
+#   Arterial Flag
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_four_arterial_flag = if_else(
     pco2_arterial > 60 & ph_arterial <= 7.3,
     TRUE, FALSE, missing = FALSE
   ))
 
-#Venous Flag
+# Venous Flag
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_four_venous_flag = if_else(
     pco2_venous > 65 & ph_venous <= 7.3,
     TRUE, FALSE, missing = FALSE
   ))
 
-#Criteria #5: Receipt of any non-invasive ventilation
+# Criteria #5: Receipt of any non-invasive ventilation
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_five_flag = if_else(
     device_category %in% c("NIPPV", "CPAP"),
     TRUE, FALSE, missing = FALSE
   ))
 
-#FLAG TO IDENTIFY HOSPITALIZATION_IDS with at least 1 criteria flag
+# FLAG TO IDENTIFY HOSPITALIZATION_IDS with at least 1 criteria flag
 merged_all_locf_final <- merged_all_locf %>%
   group_by(hospitalization_id) %>%
   mutate(
@@ -6782,8 +6584,7 @@ arf_data <- unique(arf_data, by = c("hospitalization_id", "arf_flag", "arHf_flag
 #PART SEVEN: Calculate Percent Deep Sedation, Sensitivity Analyses
 ```{r}
 # Vitals
-#Filtered Vitals
-time_dependent_vitals_2 <- c("sbp", "dbp", "map", "spo2")
+time_dependent_vitals_2 <- c("spo2")
 vitals_time_dependent_2 <- vitals_time_dependent[vital_category %in% time_dependent_vitals_2 & hospitalization_id %in% final_cohort_imv_runs_reduced$hospitalization_id]
 
 vitals_time_dependent_wide <- dcast(vitals_time_dependent_2, 
@@ -6793,16 +6594,6 @@ vitals_time_dependent_wide <- dcast(vitals_time_dependent_2,
                    fill = NA)  # Fill missing values with NA
 setorder(vitals_time_dependent_wide, hospitalization_id, recorded_dttm)
 
-# Calculate MAP values
-vitals_time_dependent_wide <- vitals_time_dependent_wide %>%
-  mutate(map = case_when(
-    is.na(map) | map == "" | map == 0 ~ (1/3 * sbp) + (2/3 * dbp),
-    TRUE ~ map
-  ))
-vitals_time_dependent_wide <- vitals_time_dependent_wide[, .(hospitalization_id, recorded_dttm, map, spo2)]
-
-vitals_time_dependent_wide[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
-
 # Labs
 labs_time_dependent_wide <- dcast(labs_time_dependent_2, 
                    hospitalization_id + recorded_dttm ~ lab_category, 
@@ -6811,12 +6602,9 @@ labs_time_dependent_wide <- dcast(labs_time_dependent_2,
                    fill = NA)  # Fill missing values with NA
 setorder(labs_time_dependent_wide, hospitalization_id, recorded_dttm)
 
-labs_time_dependent_wide[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
-
 #RASS
 pat_assess_rass_time_dependent <- pat_assess_rass_filt[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 pat_assess_rass_time_dependent <- pat_assess_rass_time_dependent[, .(hospitalization_id, recorded_dttm, rass_value)]
-pat_assess_rass_time_dependent[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
 pat_assess_rass_time_dependent[, rass_value := as.numeric(rass_value)]
 pat_assess_rass_time_dependent_wide <- pat_assess_rass_time_dependent
 setorder(pat_assess_rass_time_dependent_wide, hospitalization_id, recorded_dttm)
@@ -6832,8 +6620,6 @@ respiratory_support_time_dependent_wide <- respiratory_support |>
     fio2_set = ifelse(fio2_set >= 0.21 & fio2_set <= 1, fio2_set, NA_real_),
     lpm_set = ifelse(lpm_set >= 0 & lpm_set <= 60, lpm_set, NA_real_)
   )
-
-respiratory_support_time_dependent_wide[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
 
 respiratory_support_time_dependent_wide <- respiratory_support_time_dependent_wide %>%
   # Fill in device_category based on other values
@@ -6861,7 +6647,7 @@ respiratory_support_time_dependent_wide <- respiratory_support_time_dependent_wi
   )) %>%
   # Keep only the selected columns
   dplyr::select(hospitalization_id, recorded_dttm, device_category, mode_category, lpm_set, fio2_combined)
-
+setDT(respiratory_support_time_dependent_wide)
 setorder(respiratory_support_time_dependent_wide, hospitalization_id, recorded_dttm)
 
 # List of tables to merge
@@ -6878,21 +6664,21 @@ time_dependent_timeline_all <- reduce(tables_merge_wide, function(x, y) merge(x,
 final_cohort_timestamps <- final_cohort_imv_runs_reduced[, .(hospitalization_id, admission_dttm, discharge_dttm, begin_imv, end_imv, imv_duration_hours_final)]
 
 # Calculate start_time (24 hours before begin_imv)
-final_cohort_timestamps[, start_time := as.POSIXct(begin_imv) - hours(48), by = hospitalization_id]
+final_cohort_timestamps[, start_time := as.POSIXct(begin_imv) - hours(24)]
 
 # Calculate end_time based on the condition for each hospitalization_id
-final_cohort_timestamps[, end_time := as.POSIXct(begin_imv), by = hospitalization_id]
+final_cohort_timestamps[, end_time := as.POSIXct(begin_imv)]
 
 #24 Hours Prior to IMV Timeline
 time_dependent_timeline_pre_imv <- merge(final_cohort_timestamps, time_dependent_timeline_all, by = "hospitalization_id", all = TRUE)
-setorder(time_dependent_timeline_all, hospitalization_id, recorded_dttm)
+setorder(time_dependent_timeline_pre_imv, hospitalization_id, recorded_dttm)
 
 # Filter the table to retain rows where recorded_dttm is within the time range
 time_dependent_timeline_pre_imv_24h <- time_dependent_timeline_pre_imv[recorded_dttm >= start_time & recorded_dttm <= end_time]
-time_dependent_timeline_pre_imv_24h <- time_dependent_timeline_pre_imv_24h[, .(hospitalization_id, recorded_dttm, begin_imv, map, spo2, rass_value, po2_arterial, fio2_combined)]
+time_dependent_timeline_pre_imv_24h <- time_dependent_timeline_pre_imv_24h[, .(hospitalization_id, recorded_dttm, begin_imv, spo2, rass_value, po2_arterial, fio2_combined)]
 
 #LOCF
-cols_to_update_imv_24h <- c("map", "spo2", "rass_value", "po2_arterial", "fio2_combined")
+cols_to_update_imv_24h <- c("spo2", "rass_value", "po2_arterial", "fio2_combined")
 time_dependent_timeline_pre_imv_24h[, (cols_to_update_imv_24h) := lapply(.SD, function(x) fifelse(x == "", NA, x)), .SDcols = cols_to_update_imv_24h]
 
 time_dependent_timeline_pre_locf <- time_dependent_timeline_pre_imv_24h[, (cols_to_update_imv_24h) := lapply(.SD, function(x) na.locf(x, na.rm = FALSE)), 
@@ -6915,12 +6701,13 @@ time_dependent_timeline_last_primary[, recorded_dttm := begin_imv - minutes(15)]
 time_dependent_timeline_last_primary[, hour_imv := 0]
 time_dependent_timeline_last_primary[, c("begin_imv") := NULL]
 
-
-#Sensitivity
+# Primary analysis: impute RASS = -5 at hour 0 (deep sedation assumed at intubation onset)
+# LOCF carries this forward until first documented RASS
+# First 4 hours excluded from % deep sedation calculation to minimize imputation impact
+# Sensitivity analysis uses RASS = -1 (light sedation) to bound imputation effect
 time_dependent_timeline_last_sensitivity <- time_dependent_timeline_last_primary
 time_dependent_timeline_last_primary$rass_value <- -5
 time_dependent_timeline_last_sensitivity$rass_value <- -1
-
 
 # Form Hourly Table
 timeline_meta <- final_cohort_timestamps[, .(
@@ -6949,13 +6736,12 @@ start_end_time <- start_end_time[, .(hospitalization_id, start_time, end_time)]
 
 imv_timeline_72h[, c("start_time", "end_time") := NULL]
 
-# MERGE IT UP
+# Merge to timeline
 total_timeline <- merge(imv_timeline_72h, time_dependent_timeline_all, by = c("hospitalization_id", "recorded_dttm"), all = TRUE)
 
 setcolorder(total_timeline, c("hospitalization_id", "hour_imv", "recorded_dttm", "rass_value", "spo2",  "po2_arterial", "fio2_combined"))
 
 total_timeline_filt <- merge(total_timeline, start_end_time, by = "hospitalization_id", all = TRUE)
-
 
 #LOCF
 cols_to_update_imv_total <- c("hour_imv", "rass_value", "spo2", "po2_arterial", "fio2_combined")
@@ -6977,24 +6763,24 @@ setDT(total_timeline_primary)
 setDT(final_cohort_imv_runs_reduced)
 setorder(total_timeline_primary, hospitalization_id, recorded_dttm)
 
-# 1. LOCF pao2_imputed within hospitalization
+# 1 LOCF pao2_imputed within hospitalization
 total_timeline_primary[
   ,
   pao2_imputed := na.locf(pao2_imputed, na.rm = FALSE),
   by = hospitalization_id
 ]
 
-# 2. Calculate P/F ratios
+# 2 Calculate P/F ratios
 total_timeline_primary[, p_to_f := po2_arterial / fio2_combined]
 total_timeline_primary[, p_to_f_imputed := pao2_imputed / fio2_combined]
 
-# 3. Keep only needed NMBA start times
+# 3 Keep only needed NMBA start times
 nmba_times <- summary_meds_data_final[
   !is.na(continuous_nmba_start_48),
   .(hospitalization_id, continuous_nmba_start_48)
 ]
 
-# 4. Join timeline to NMBA table and keep rows in the 1 hour before NMBA start
+# 4 Join timeline to NMBA table and keep rows in the 1 hour before NMBA start
 pf_candidates <- total_timeline_primary[
   nmba_times,
   on = .(hospitalization_id),
@@ -7004,7 +6790,7 @@ pf_candidates <- total_timeline_primary[
     recorded_dttm > (continuous_nmba_start_48 - 3600)
 ]
 
-# 5. For each hospitalization, pick the most recent row in that 1-hour window
+# 5 For each hospitalization, pick the most recent row in that 1-hour window
 #    Prefer measured p_to_f if available; otherwise use p_to_f_imputed
 pf_before_nmba <- pf_candidates[
   order(hospitalization_id, continuous_nmba_start_48, -recorded_dttm)
@@ -7034,7 +6820,7 @@ pf_before_nmba <- pf_candidates[
   by = .(hospitalization_id, continuous_nmba_start_48)
 ]
 
-# 6. Merge back to your cohort table if desired
+# 6 Merge back to your cohort table if desired
 summary_meds_data_final <- merge(
   summary_meds_data_final,
   pf_before_nmba,
@@ -7050,7 +6836,7 @@ total_timeline_locf_primary <- total_timeline_primary[, (cols_to_update_imv_tota
 total_timeline_locf_primary_filt <- total_timeline_locf_primary[recorded_dttm >= start_time & recorded_dttm <= end_time]
 
 # Define columns for min and max selection
-cols_min <- c("rass_value", "map", "spo2", "po2_arterial", "pao2_imputed")
+cols_min <- c("rass_value", "spo2", "po2_arterial", "pao2_imputed")
 cols_max <- c("fio2_combined")
 
 # Compute the min and max for each hospitalization_id and hour_imv
@@ -7067,11 +6853,6 @@ total_timeline_hourly_primary <- as.data.frame(total_timeline_hourly_primary)
 # Define columns to plot
 columns_to_plot <- c("rass_value", "po2_arterial", "fio2_combined", "pao2_imputed")
 
-# Convert data to long format
-total_timeline_hourly_long <- total_timeline_hourly_primary %>%
-  select_at(vars(one_of(columns_to_plot))) %>% 
-  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
-
 #Sensitivity Analysis Numbers
 cols_to_update_imv_sensitivity <- c("hour_imv", "rass_value")
 
@@ -7081,7 +6862,7 @@ total_timeline_sensitivity[, pao2_imputed := {
   s <- spo2 / 100
   a <- 11700 / ((1 / s) - 1)
   b <- sqrt(50^3 + a^2)
-  (b + a)^(1/3) - (b - a)^(1/3)
+  (b + a)^(1/3) + (b - a)^(1/3)
 }]
 
 total_timeline_sensitivity[, (cols_to_update_imv_sensitivity) := lapply(.SD, function(x) fifelse(x == "", NA, x)), .SDcols = cols_to_update_imv_sensitivity]
@@ -7121,7 +6902,7 @@ independent_dependent_merge <- merge(total_timeline_hourly_rass_filter, final_co
 
 #Calculate Percent Deep Sedation for total 72 hours
 timeline_72h_no_first_four <- independent_dependent_merge %>%
-  filter(hour_imv < 0 | hour_imv >= 4)
+  filter(hour_imv >= 4)
 
 deep_sedation_count_total_72 <- timeline_72h_no_first_four[
   deep_sedation_hourly == TRUE, 
@@ -7146,10 +6927,10 @@ sedation_and_imv_72[, percent_deep_sedation_72 := (deep_sedation_count_total_72 
 
 
 #Calculate Percent Deep Sedation for First 48 Hours
-independent_dependent_merge_48 <- independent_dependent_merge[hour_imv >= 1 & hour_imv <= 48]
+independent_dependent_merge_48 <- independent_dependent_merge[hour_imv <= 48]
 
 timeline_48h_no_first_four <- independent_dependent_merge_48 %>%
-  filter(hour_imv < 0 | hour_imv >= 4)
+  filter(hour_imv >= 4)
 
 deep_sedation_count_total_48 <- timeline_48h_no_first_four[
   deep_sedation_hourly == TRUE, 
@@ -7180,10 +6961,10 @@ total_timeline_hourly_rass_sensitivity <- total_timeline_hourly_sensitivity[,
 ]
 
 #Calculate Percent Deep Sedation
-total_timeline_hourly_rass_sensitivity_48 <- total_timeline_hourly_rass_sensitivity[hour_imv >= 0 & hour_imv <= 48]
+total_timeline_hourly_rass_sensitivity_48 <- total_timeline_hourly_rass_sensitivity[hour_imv <= 48]
 
 timeline_48h_no_first_four_sensitivity <- total_timeline_hourly_rass_sensitivity_48 %>%
-  filter(hour_imv < 0 | hour_imv >= 4)
+  filter(hour_imv >= 4)
 
 deep_sedation_count_total_48_sensitivity <- timeline_48h_no_first_four_sensitivity[
   deep_sedation_hourly == TRUE, 
@@ -7191,7 +6972,7 @@ deep_sedation_count_total_48_sensitivity <- timeline_48h_no_first_four_sensitivi
   by = hospitalization_id
 ]
 setnames(deep_sedation_count_total_48_sensitivity, "N", "deep_sedation_count_total_48_sensitivity")
-deep_sedation_count_total_48_sensitivity[, deep_sedation_count_total_48_sensitivity := deep_sedation_count_total_48_sensitivity - 1]
+deep_sedation_count_total_48_sensitivity[, deep_sedation_count_total_48_sensitivity := deep_sedation_count_total_48_sensitivity]
 
 
 row_count_minus_one_48_sensitivity <- timeline_48h_no_first_four_sensitivity[
@@ -7228,11 +7009,10 @@ primary_analysis_raw <- reduce(primary_analysis_tables, function(x, y) merge(x, 
 # Replace NA values in rass_below_minus_3_count with 0
 setnafill(primary_analysis_raw, cols = "rass_below_minus_3_count", fill = 0)
 
-primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, patient_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, icu_admission_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted, rass_weighted_avg, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, cont_prop_receipt, cont_precedex_receipt, cont_ketamine_receipt, cont_pentobarbital_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, pf_selected, pf_source, pf_recorded_dttm, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
+primary_analysis_analytic <- primary_analysis_raw[, .(hospitalization_id, begin_imv, end_imv, imv_duration_hours_final, admission_dttm, discharge_dttm, death_dttm, hospital_id, icu_imv, hospital_icu_id, location_of_intubation, first_location_category, age_at_admission, age_category, admission_type_category, discharge_category, sex_category, race_category, ethnicity_category, ethnicity_category_final, SVM_SCORE, language_category, elixhauser_score, weight_kg, admission_height, bmi, trached, reintubation_final, mortality_28day, death_during_admission, hospital_free_days_6mo, hospital_free_days_28, icu_free_days_28, vent_free_days_28, vent_free_days_28_alt, laps2, deep_sedation_weighted, rass_weighted_avg, sedation_index_score, rass_frequency_hrs, time_from_begin_imv_to_icu_hours, time_to_first_rass, hours_mechanically_ventilated_72, percent_deep_sedation_48, percent_deep_sedation_72, percent_deep_sedation_48_sensitivity, propofol_avg_mcgkgmin_48, dexmedetomidine_avg_mcgkghr_48, cont_opioids_receipt, cont_benzos_receipt, cont_prop_receipt, cont_precedex_receipt, cont_ketamine_receipt, cont_pentobarbital_receipt, total_mme, lorazepam_equiv_total_48, continuous_nmba_48, continuous_nmba_start_48, continuous_nmba_hours_48, pf_selected, pf_source, pf_recorded_dttm, push_paralytics, cont_analgesia_only, arf_flag, arHf_flag)]
 
 #Add Observation Year
 primary_analysis_analytic[, observation_year := year(begin_imv)]
 
 write_parquet(primary_analysis_analytic, paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
-  
 ```
