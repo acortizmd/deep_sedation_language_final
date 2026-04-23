@@ -149,7 +149,7 @@ cont_vars <- c("age_at_admission", "bmi", "elixhauser_score", "SVM_SCORE", "laps
 
 #Function to Create Table 1s
 ```{r}
-#Table 1: Descriptive
+#Function to Create Table 1s
 make_table1_federated <- function(dt,
                                   cat_vars = NULL,
                                   cont_vars = NULL,
@@ -184,9 +184,7 @@ make_table1_federated <- function(dt,
           sd = NA_real_,
           median = NA_real_,
           p25 = NA_real_,
-          p75 = NA_real_,
-          min = NA_real_,
-          max = NA_real_
+          p75 = NA_real_
         )]
         
       } else {
@@ -207,16 +205,14 @@ make_table1_federated <- function(dt,
           sd = NA_real_,
           median = NA_real_,
           p25 = NA_real_,
-          p75 = NA_real_,
-          min = NA_real_,
-          max = NA_real_
+          p75 = NA_real_
         )]
       }
       
       tmp <- tmp[, .(
         site, group, variable, variable_type, level,
         n, N, pct,
-        mean, sd, median, p25, p75, min, max
+        mean, sd, median, p25, p75
       )]
       
       out_list[[paste0("cat_", v)]] <- tmp
@@ -238,9 +234,7 @@ make_table1_federated <- function(dt,
           sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
           median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
           p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
-          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE)),
-          min = if (all(is.na(get(v)))) NA_real_ else min(get(v), na.rm = TRUE),
-          max = if (all(is.na(get(v)))) NA_real_ else max(get(v), na.rm = TRUE)
+          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE))
         ), by = by]
         
         setnames(tmp, old = by, new = "group")
@@ -261,9 +255,7 @@ make_table1_federated <- function(dt,
           sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
           median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
           p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
-          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE)),
-          min = if (all(is.na(get(v)))) NA_real_ else min(get(v), na.rm = TRUE),
-          max = if (all(is.na(get(v)))) NA_real_ else max(get(v), na.rm = TRUE)
+          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE))
         )]
         
         tmp[, `:=`(
@@ -278,7 +270,7 @@ make_table1_federated <- function(dt,
       tmp <- tmp[, .(
         site, group, variable, variable_type, level,
         n, N, pct,
-        mean, sd, median, p25, p75, min, max
+        mean, sd, median, p25, p75
       )]
       
       out_list[[paste0("cont_", v)]] <- tmp
@@ -289,13 +281,33 @@ make_table1_federated <- function(dt,
   
   setcolorder(out, c(
     "site", "group", "variable", "variable_type", "level",
-    "n", "N", "pct", "mean", "sd", "median", "p25", "p75", "min", "max"
+    "n", "N", "pct", "mean", "sd", "median", "p25", "p75"
   ))
+  
+  #-----------------------------#
+  # CENSORING
+  #-----------------------------#
+  # Categorical: suppress counts and percentages below threshold
+  out[variable_type == "categorical" & n < 10,
+      `:=`(pct = NA_real_)]
+  out[variable_type == "categorical",
+      n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
+  out[variable_type == "categorical" & n < 10,
+      n := NA_real_]
+  
+  # Continuous: suppress all summary stats for small groups
+  out[variable_type == "continuous" & n < 10,
+      `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_,
+           p25 = NA_real_, p75 = NA_real_)]
+  out[variable_type == "continuous",
+      n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
+  out[variable_type == "continuous" & n < 10,
+      n := NA_real_]
   
   return(out[])
 }
 
-# Table 1: Comparative
+
 make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
                                     site_name = NA_character_, group_levels = NULL,
                                     reference_level = NULL, fisher_if_expected_lt5 = TRUE) {
@@ -550,9 +562,42 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
 
   out <- rbindlist(all_comparisons, fill = TRUE, use.names = TRUE)
   
+  #-----------------------------#
+  # CENSORING
+  #-----------------------------#
+  # Add censored count columns before suppressing raw values
+  out[, group1_n_censored := ifelse(group1_n < 10, "<10", as.character(group1_n))]
+  out[, group2_n_censored := ifelse(group2_n < 10, "<10", as.character(group2_n))]
+  
+  # Suppress all statistics when either group is below threshold
+  out[group1_n < 10 | group2_n < 10,
+      `:=`(
+        estimate  = NA_real_,
+        ci_lower  = NA_real_,
+        ci_upper  = NA_real_,
+        p_value   = NA_real_,
+        smd       = NA_real_,
+        group1_mean   = NA_real_,
+        group2_mean   = NA_real_,
+        group1_sd     = NA_real_,
+        group2_sd     = NA_real_,
+        group1_median = NA_real_,
+        group2_median = NA_real_,
+        group1_p25    = NA_real_,
+        group2_p25    = NA_real_,
+        group1_p75    = NA_real_,
+        group2_p75    = NA_real_,
+        note = "Suppressed: cell size < 10"
+      )]
+  
+  # Suppress raw counts after creating censored versions
+  out[group1_n < 10, group1_n := NA_real_]
+  out[group2_n < 10, group2_n := NA_real_]
+
   desired_order <- c(
     "site", "variable", "variable_type", "comparison", "level",
-    "group1", "group2", "group1_n", "group2_n",
+    "group1", "group2", "group1_n", "group1_n_censored",
+    "group2_n", "group2_n_censored",
     "group1_mean", "group2_mean", "group1_sd", "group2_sd",
     "group1_median", "group2_median", "group1_p25", "group2_p25",
     "group1_p75", "group2_p75",
@@ -1215,6 +1260,35 @@ fwrite(
   primary_cohort_comparisons,
   file.path(sedation_tables_dir, paste0(institution, "_table1_primary_cohort_comparisons.csv"))
 )
+
+# Ethnicity and Race Counts by Language Group
+# Cell counts for Spanish speakers by race
+spanish_race_counts <- primary_cohort[
+  lang_cat_6 == "spanish", 
+  .N, 
+  by = race_category
+]
+
+# Cell counts for Spanish speakers by ethnicity
+spanish_ethnicity_counts <- primary_cohort[
+  lang_cat_6 == "spanish",
+  .N,
+  by = ethnicity_category
+]
+
+# Apply censoring - replace counts below 10 with a placeholder
+spanish_race_counts[, N_censored := ifelse(N < 10, "<10", as.character(N))]
+spanish_ethnicity_counts[, N_censored := ifelse(N < 10, "<10", as.character(N))]
+
+# Drop the raw N column before saving so censored values can't be back-calculated
+spanish_race_counts[, N := NULL]
+spanish_ethnicity_counts[, N := NULL]
+
+fwrite(spanish_race_counts, 
+       file.path(cohort_characteristics, paste0(institution, "_spanish_race_cell_counts.csv")))
+fwrite(spanish_ethnicity_counts, 
+       file.path(cohort_characteristics, paste0(institution, "_spanish_ethnicity_cell_counts.csv")))
+
 ################################################################################
 # Primary Cohort - Primary Analysis - Unadjusted and Adjusted
 ################################################################################
@@ -1638,6 +1712,49 @@ sensitivity_model_paralytic_inclusion_results <- data.frame(
 # Save the results to a file
 fwrite(sensitivity_model_paralytic_inclusion_results, file.path(sedation_sensitivity, paste0(institution, "_sensitivity_analysis_paralytic_inclusion.csv")))
 
+##############################
+# Race x Language Interaction
+primary_model_race_language_interaction <- lm(
+  percent_deep_sedation_48 ~ lang_cat_6 * race_category + age_category + 
+    sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + 
+    SVM_SCORE + laps2 + factor(observation_year),
+  data = primary_cohort
+)
+summary(primary_model_race_language_interaction)
+
+primary_model_race_language_interaction_results <- data.frame(
+  term = names(coef(primary_model_race_language_interaction)),
+  estimate = coef(primary_model_race_language_interaction),
+  std.error = summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"],
+  variance = (summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"])^2,
+  p.value = summary(primary_model_race_language_interaction)$coefficients[, "Pr(>|t|)"]
+)
+
+fwrite(primary_model_race_language_interaction_results, 
+       file.path(sedation_final_data, paste0(institution, "_primary_model_race_language_interaction.csv")))
+
+############################
+# Ethnicity x Language Interaction
+primary_model_ethnicity_language_interaction <- lm(
+  percent_deep_sedation_48 ~ lang_cat_6 * ethnicity_category + race_category + age_category + 
+    sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + 
+    SVM_SCORE + laps2 + factor(observation_year),
+  data = primary_cohort
+)
+summary(primary_model_ethnicity_language_interaction)
+
+primary_model_ethnicity_language_interaction_results <- data.frame(
+  term = names(coef(primary_model_ethnicity_language_interaction)),
+  estimate = coef(primary_model_ethnicity_language_interaction),
+  std.error = summary(primary_model_ethnicity_language_interaction)$coefficients[, "Std. Error"],
+  variance = (summary(primary_model_ethnicity_language_interaction)$coefficients[, "Std. Error"])^2,
+  p.value = summary(primary_model_ethnicity_language_interaction)$coefficients[, "Pr(>|t|)"]
+)
+
+fwrite(primary_model_ethnicity_language_interaction_results, 
+       file.path(sedation_final_data, paste0(institution, "_primary_model_ethnicity_language_interaction.csv")))
+
+
 ################################################################################
 # Primary Cohort: Exploratory Analyses, Medications
 ################################################################################
@@ -1774,6 +1891,27 @@ exploratory_model_mme_results <- data.frame(
 
 # Save the results to a file
 fwrite(exploratory_model_mme_results, file.path(sedation_exploratory, paste0(institution, "_exploratory_analysis_mme_total.csv")))
+
+############################
+# Race x Language Interaction
+primary_model_race_language_interaction <- lm(
+  percent_deep_sedation_48 ~ lang_cat_6 * race_category + age_category + 
+    sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + 
+    SVM_SCORE + laps2 + factor(observation_year),
+  data = primary_cohort
+)
+summary(primary_model_race_language_interaction)
+
+primary_model_race_language_interaction_results <- data.frame(
+  term = names(coef(primary_model_race_language_interaction)),
+  estimate = coef(primary_model_race_language_interaction),
+  std.error = summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"],
+  variance = (summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"])^2,
+  p.value = summary(primary_model_race_language_interaction)$coefficients[, "Pr(>|t|)"]
+)
+
+fwrite(primary_model_race_language_interaction_results, 
+       file.path(sedation_final_data, paste0(institution, "_primary_model_race_language_interaction.csv")))
 
 ```
 

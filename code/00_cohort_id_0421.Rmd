@@ -3291,10 +3291,10 @@ write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_c
 ```{r}
 #Save Point Code if need to re-run and don't want to re-run LAPS2 can simply run parts 0-3 to upload tables/directories then remove # before code below and start here.
 
-time_dependent_vitals <- c("sbp", "dbp", "map", "spo2", "temp_c", "heart_rate", "respiratory_rate")
-vitals_time_dependent <- vitals[vital_category %in% time_dependent_vitals & hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
+#time_dependent_vitals <- c("sbp", "dbp", "map", "spo2", "temp_c", "heart_rate", "respiratory_rate")
+#vitals_time_dependent <- vitals[vital_category %in% time_dependent_vitals & hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
+#labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
+#final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
  
 ################################################################################
 # Define functions to look up meds - robust to missing meds
