@@ -1,0 +1,8 @@
+# R artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# Sensitive/large data
+intermittent_data_DO_NOT_UPLOAD/
+output/
