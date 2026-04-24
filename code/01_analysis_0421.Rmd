@@ -226,14 +226,14 @@ make_table1_federated <- function(dt,
       
       if (!is.null(by)) {
         tmp <- dt[, .(
-          n = sum(!is.na(get(v))),
-          N = .N,
-          pct = NA_real_,
-          mean = if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE),
-          sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
-          median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
-          p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
-          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE))
+          n      = sum(!is.na(get(v))),
+          N      = .N,
+          pct    = NA_real_,
+          mean   = as.numeric(if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE)),
+          sd     = as.numeric(if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE)),
+          median = as.numeric(if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE)),
+          p25    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.25, na.rm = TRUE)),
+          p75    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.75, na.rm = TRUE))
         ), by = by]
         
         setnames(tmp, old = by, new = "group")
@@ -247,14 +247,14 @@ make_table1_federated <- function(dt,
         
       } else {
         tmp <- dt[, .(
-          n = sum(!is.na(get(v))),
-          N = .N,
-          pct = NA_real_,
-          mean = if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE),
-          sd = if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE),
-          median = if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE),
-          p25 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.25, na.rm = TRUE)),
-          p75 = if (all(is.na(get(v)))) NA_real_ else as.numeric(quantile(get(v), 0.75, na.rm = TRUE))
+          n      = sum(!is.na(get(v))),
+          N      = .N,
+          pct    = NA_real_,
+          mean   = as.numeric(if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE)),
+          sd     = as.numeric(if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE)),
+          median = as.numeric(if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE)),
+          p25    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.25, na.rm = TRUE)),
+          p75    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.75, na.rm = TRUE))
         )]
         
         tmp[, `:=`(
@@ -286,7 +286,6 @@ make_table1_federated <- function(dt,
   #-----------------------------#
   # CENSORING
   #-----------------------------#
-  # Categorical: suppress counts and percentages below threshold
   out[variable_type == "categorical" & n < 10,
       `:=`(pct = NA_real_)]
   out[variable_type == "categorical",
@@ -294,7 +293,6 @@ make_table1_federated <- function(dt,
   out[variable_type == "categorical" & n < 10,
       n := NA_real_]
   
-  # Continuous: suppress all summary stats for small groups
   out[variable_type == "continuous" & n < 10,
       `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_,
            p25 = NA_real_, p75 = NA_real_)]
@@ -305,7 +303,6 @@ make_table1_federated <- function(dt,
   
   return(out[])
 }
-
 
 make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
                                     site_name = NA_character_, group_levels = NULL,
@@ -2053,22 +2050,41 @@ fwrite(
 )
 
 # Sensitivity Analysis for Patients Admitted to only MICUs
-subgroup_model_micu_cohort <- lm(percent_deep_sedation_48 ~ lang_cat_6 + race_category + age_category + bmi + sex_category + factor(hospital_icu_id) + elixhauser_score + SVM_SCORE + laps2 + factor(observation_year),
-               data = micu_cohort)
 
-summary(subgroup_model_micu_cohort)
+# Build the RHS dynamically, dropping any factor with <2 levels in this subset
+base_rhs <- c("lang_cat_6", "race_category", "age_category", "bmi",
+              "sex_category", "factor(hospital_icu_id)", "elixhauser_score",
+              "SVM_SCORE", "laps2", "factor(observation_year)")
 
-# Extract coefficients, standard errors, variance, and p-values for the adjusted model
-subgroup_model_micu_cohort_results <- data.frame(
-  term = names(coef(subgroup_model_micu_cohort)),
-  estimate = coef(subgroup_model_micu_cohort),
-  std.error = summary(subgroup_model_micu_cohort)$coefficients[, "Std. Error"],
-  variance = (summary(subgroup_model_micu_cohort)$coefficients[, "Std. Error"])^2,  # Calculate variance
-  p.value = summary(subgroup_model_micu_cohort)$coefficients[, "Pr(>|t|)"]  # Extract p-values
-)
+n_levels <- function(x) length(unique(x[!is.na(x)]))
+drop <- character(0)
+if (n_levels(micu_cohort$hospital_icu_id)  < 2) drop <- c(drop, "factor(hospital_icu_id)")
+if (n_levels(micu_cohort$observation_year) < 2) drop <- c(drop, "factor(observation_year)")
+if (n_levels(micu_cohort$lang_cat_6)       < 2) {
+  warning("lang_cat_6 has <2 levels in MICU cohort — skipping MICU model")
+  subgroup_model_micu_cohort <- NULL
+} else {
+  rhs <- setdiff(base_rhs, drop)
+  if (length(drop)) message("MICU model: dropping zero-variance term(s): ",
+                            paste(drop, collapse = ", "))
+  f <- reformulate(rhs, response = "percent_deep_sedation_48")
+  subgroup_model_micu_cohort <- lm(f, data = micu_cohort)
+}
 
-# Save the results to a file
-fwrite(subgroup_model_micu_cohort_results, file.path(sedation_subgroup, paste0(institution, "_subgroup_analysis_micu.csv")))
+if (!is.null(subgroup_model_micu_cohort)) {
+  summary(subgroup_model_micu_cohort)
+
+  subgroup_model_micu_cohort_results <- data.frame(
+    term = names(coef(subgroup_model_micu_cohort)),
+    estimate = coef(subgroup_model_micu_cohort),
+    std.error = summary(subgroup_model_micu_cohort)$coefficients[, "Std. Error"],
+    variance = (summary(subgroup_model_micu_cohort)$coefficients[, "Std. Error"])^2,
+    p.value = summary(subgroup_model_micu_cohort)$coefficients[, "Pr(>|t|)"]
+  )
+
+  fwrite(subgroup_model_micu_cohort_results, 
+         file.path(sedation_subgroup, paste0(institution, "_subgroup_analysis_micu.csv")))
+}
 
 ################################################################################
 # Acute Respiratory Failure Subgroup Analysis
