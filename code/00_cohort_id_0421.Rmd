@@ -12,7 +12,7 @@ install_if_missing <- function(package) {
     library(package, character.only = TRUE)
   }
 }
- 
+
 sapply(packages, install_if_missing)
 
 # Load necessary libraries
@@ -2439,6 +2439,10 @@ anion_gap_df <- sodium_df %>%
 labs_time_dependent <- labs_time_dependent |>
   bind_rows(anion_gap_df)
 
+# Re-create to fix bug with anion_gap below
+labs_time_dependent_2 <- labs_time_dependent[
+  hospitalization_id %in% final_cohort_imv_runs$hospitalization_id
+]
 
 # LAPS2 Score Part 3: Fix/Prep Labs for Pre-LAPS2 Logistic Regression
 # NOTE: Pre-LAPS still uses 24h after hospital admission — this feeds the
@@ -3200,7 +3204,7 @@ write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_c
 #vitals_time_dependent <- vitals[vital_category %in% time_dependent_vitals & hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 #labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 #final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
- 
+
 ################################################################################
 # Define functions to look up meds - robust to missing meds
 ################################################################################
