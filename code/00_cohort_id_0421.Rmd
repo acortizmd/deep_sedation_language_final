@@ -5,7 +5,7 @@
 ```{r setup}
 # Install Packages
 
-packages <- c("tidyverse", "zoo", "data.table", "dplyr", "lubridate", "tidyr", "fst", "arrow", "table1", "lme4", "metafor", "yaml", "pscl", "MASS", "htmltools", "car", "WeightIt", "MatchIt", "purrr", "survival", "mediation", "cmprsk", "gfoRmula", "nnet", "medflex", "bruceR", "survey", "ipw", "geepack", "readr", "collapse", "stringr", "rprojroot")
+packages <- c("tidyverse", "zoo", "data.table", "dplyr", "lubridate", "tidyr", "fst", "arrow", "table1", "lme4", "metafor", "yaml", "pscl", "MASS", "htmltools", "car", "WeightIt", "MatchIt", "purrr", "survival", "mediation", "cmprsk", "gfoRmula", "nnet", "medflex", "bruceR", "survey", "ipw", "geepack", "readr", "collapse", "stringr", "rprojroot", "tableone", "lmtest", "broom")
 install_if_missing <- function(package) {
   if (!require(package, character.only = TRUE)) {
     install.packages(package, dependencies = TRUE)
@@ -32,7 +32,7 @@ library(pscl)
 library(car)
 library(stringr)
 library(rprojroot)
-library(jsonlite)
+library(broom)
 
 # Define paths
 project_root <- file.path(
@@ -86,15 +86,12 @@ for (dir in dirs_to_create) {
 
 #PART ZERO: Fix Hospitalization
 ```{r}
-# This block of code will adjust for hospitalizations that are continuous within a health system
-# This looks at patient_id and discharge_dttm and admission_dttm for hospitalization_ids that are close in time
-# This creates new hospitalization_ids that are chronological starting from 1
-# It also creates a cross-walk that converts the original hospitalization_id to the new hospitalization_id for
-#   additional tables to be properly uploaded later
+# This block adjusts for hospitalizations that are continuous within a health system.
+# It looks at patient_id, discharge_dttm, and admission_dttm for hospitalization_ids
+# that are close in time, creates new chronological hospitalization_ids, and builds
+# a crosswalk (hosp_map) used by read_data() to remap all downstream tables.
 
-# Function to load in original clif_hospitalization table
 read_data_start <- function(file_path, select = NULL) {
-  # ---- 1) Read ----
   if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
     dt <- fread(file_path, select = select)
   } else if (grepl("\\.parquet$", file_path)) {
@@ -113,204 +110,121 @@ read_data_start <- function(file_path, select = NULL) {
     stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
   }
 
-  # Convert to data.table early
   dt <- data.table::as.data.table(dt)
 
-  # ---- 2) Normalize all *_dttm columns ----
   dttm_cols <- names(dt)[grepl("dttm$", names(dt))]
   local_tz  <- time_zone
   message("Using timezone: ", local_tz)
 
   for (var in dttm_cols) {
-
     col <- dt[[var]]
 
-    # Already POSIXct
     if (inherits(col, "POSIXct")) {
       existing_tz <- attr(col, "tzone")
-
-      # Matches YAML tz → leave alone
       if (!is.null(existing_tz) && nzchar(existing_tz) && existing_tz == local_tz) {
         message("✅ ", var, ": tzone already '", local_tz, "', no change")
         next
       }
-
-      # Blank, NULL, or UTC/GMT → stamp with local_tz, no clock shift
       if (is.null(existing_tz) || !nzchar(existing_tz) || existing_tz %in% c("UTC", "GMT")) {
         dt[, (var) := lubridate::force_tz(get(var), tzone = local_tz)]
         message("🔧 ", var, ": tzone was '", if (is.null(existing_tz)) "(none)" else existing_tz,
                 "', stamped as '", local_tz, "' (no clock shift)")
         next
       }
-
-      # Different real timezone → warn and leave alone
       warning("⚠️  ", var, ": tzone is '", existing_tz, "', which differs from YAML time_zone '",
               local_tz, "'. Leaving as-is. Check your source data.")
       next
     }
 
-    # Date columns → assign midnight, stamp with local_tz
     if (inherits(col, "Date")) {
       dt[, (var) := lubridate::force_tz(as.POSIXct(get(var)), tzone = local_tz)]
-      message("📅 ", var, ": Date → POSIXct midnight, stamped as '", local_tz, "'")
+      message("📅 ", var, ": Date -> POSIXct midnight, stamped as '", local_tz, "'")
       next
     }
 
-    # Character / factor → parse then stamp
     raw_vec <- if (is.factor(col)) as.character(col) else col
-
     suppressWarnings(parsed <- lubridate::ymd_hms(raw_vec, quiet = TRUE))
-
     bad_idx <- is.na(parsed) & !is.na(raw_vec) & nzchar(trimws(raw_vec))
     if (any(bad_idx)) {
       suppressWarnings(parsed_date <- lubridate::ymd(raw_vec[bad_idx], quiet = TRUE))
       parsed[bad_idx] <- as.POSIXct(parsed_date)
     }
-
     dt[, (var) := lubridate::force_tz(parsed, tzone = local_tz)]
     message("🔧 ", var, ": parsed from character/factor, stamped as '", local_tz, "'")
   }
 
-  # ---- 3) Peek & return ----
   dt %>% glimpse()
   return(dt)
 }
 
-
-# Function to create hospital block IDs and identify admissions within 3 hours of a discharge
-clif_hospitalization_start <- 
-  read_data_start(paste0(data_dir, "clif_hospitalization", file_type)) |> 
-  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, age_at_admission, patient_id, 
-                discharge_name, discharge_category) |> 
-  mutate(across(where(is.factor), as.character)) |> 
+# Load and clean hospitalization table
+clif_hospitalization_start <-
+  read_data_start(paste0(data_dir, "clif_hospitalization", file_type)) |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, age_at_admission,
+                patient_id, discharge_name, discharge_category) |>
+  mutate(across(where(is.factor), as.character)) |>
   mutate(across(where(is.character), str_to_lower)) |>
   as.data.table()
 
-# Create Hospital Block ID - Identifies Continuous Hospitalizations When Patients Are Transferred Between Hospitals in One Health System
+# Identify linked encounters (admissions within 6 hours of a discharge)
 hospital_blocks <- clif_hospitalization_start[, .(patient_id, hospitalization_id, admission_dttm, discharge_dttm)]
 setorder(hospital_blocks, patient_id, admission_dttm)
 
-# Identify Admissions Within 6 Hours of a Discharge (Considered Linked, Part of One Continuous Encounter)
-linked_encounters <- copy(hospital_blocks)
-linked_encounters[, next_admit_dttm := data.table::shift(admission_dttm, n = 1L, type = "lead"), by = patient_id]
-linked_encounters[, prev_dc_dttm    := data.table::shift(discharge_dttm,  n = 1L, type = "lag"),  by = patient_id]
-linked_encounters[, next_diff_time  := as.numeric(difftime(next_admit_dttm, discharge_dttm, units = "hours"))]
-linked_encounters[, prev_diff_time  := as.numeric(difftime(admission_dttm,  prev_dc_dttm,   units = "hours"))]
+hospital_blocks[, next_diff_time := as.numeric(difftime(
+  shift(admission_dttm, type = "lead"), discharge_dttm, units = "hours"
+)), by = patient_id]
 
-linked_encounters[, linked := fcase(
-  (next_diff_time < 6 | prev_diff_time < 6), 1L
-)]
-linked_encounters <- linked_encounters[linked == 1L]
+hospital_blocks[, prev_diff_time := as.numeric(difftime(
+  admission_dttm, shift(discharge_dttm, type = "lag"), units = "hours"
+)), by = patient_id]
 
-linked_encounters[, first_link := fcase(
-  (rowid(linked) == 1L | (next_diff_time < 3 & prev_diff_time > 3)), 1L
-), by = patient_id]
+hospital_blocks[, linked := as.integer(next_diff_time < 6 | prev_diff_time < 6)]
 
-# Number the link groups
-temp <- linked_encounters[first_link == 1L]
-temp[, link_group := seq_len(.N), by = patient_id]
-linked_encounters <- temp[linked_encounters, on = .(hospitalization_id)]
-linked_encounters[, link_group := zoo::na.locf(link_group, na.rm = FALSE), by = patient_id]
-linked_encounters[, link_number := seq_len(.N), by = .(patient_id, link_group)]
-linked_encounters <- linked_encounters[, .(hospitalization_id, linked, link_number)]
-rm(temp)
+# Number link groups within patient using cumsum
+hospital_blocks[, link_group := {
+  is_new_group <- is.na(shift(linked)) | linked == 0 |
+                  (linked == 1 & (is.na(prev_diff_time) | prev_diff_time >= 6))
+  cumsum(is_new_group)
+}, by = patient_id]
 
-# Join linked encounters back to hospitalization start
-clif_hospitalization_start <- linked_encounters[
+# Merge link group back to full hospitalization table
+clif_hospitalization_start <- hospital_blocks[
   clif_hospitalization_start,
-  on = "hospitalization_id"
+  on = .(patient_id, hospitalization_id)
 ]
-clif_hospitalization_start[is.na(linked), linked := 0L]
-setorder(clif_hospitalization_start, patient_id, admission_dttm)
 
-# Pull out non-first linked encounters
-df_link <- clif_hospitalization_start[link_number > 1L]
+# Unlinked hospitalizations get their own block
+clif_hospitalization_start[is.na(linked), link_group := .I]
+clif_hospitalization_start[, encounter_block := .GRP, by = .(patient_id, link_group)]
 
-# Assign encounter blocks to first/unlinked encounters only
-dt_first <- clif_hospitalization_start[link_number == 1L | is.na(link_number)]
-dt_first[, encounter_block := .I]
+# Collapse to one row per encounter block
+clif_hospitalization <- clif_hospitalization_start[
+  , .(
+    hospitalization_id  = hospitalization_id[1],
+    age_at_admission    = age_at_admission[1],
+    admission_dttm      = admission_dttm[1],
+    discharge_dttm      = discharge_dttm[.N],
+    discharge_name      = discharge_name[.N],
+    discharge_category  = discharge_category[.N]
+  ),
+  by = .(patient_id, encounter_block)
+][, clif_hospitalizations_joined_id := .I]
 
-# Bind back together and re-sort
-clif_hospitalization <- rbindlist(list(dt_first, df_link), fill = TRUE)
-setorder(clif_hospitalization, patient_id, admission_dttm)
-
-# LOCF encounter_block down within patient
-clif_hospitalization[, encounter_block := zoo::na.locf(encounter_block, na.rm = FALSE), by = patient_id]
-
-# Compute group ID and final admit/discharge info within each encounter block
-clif_hospitalization[, clif_hospitalizations_joined_id := .GRP, by = .(patient_id, encounter_block)]
-clif_hospitalization[, final_admission_dttm     := admission_dttm[1L],     by = .(patient_id, encounter_block)]
-clif_hospitalization[, final_discharge_dttm     := discharge_dttm[.N],     by = .(patient_id, encounter_block)]
-clif_hospitalization[, final_discharge_name     := discharge_name[.N],     by = .(patient_id, encounter_block)]
-clif_hospitalization[, final_discharge_category := discharge_category[.N], by = .(patient_id, encounter_block)]
-
-# Select and rename final columns
-clif_hospitalization <- clif_hospitalization[, .(
-  clif_hospitalizations_joined_id,
-  hospitalization_id,
-  patient_id,
-  encounter_block,
-  age_at_admission,
-  admission_dttm     = final_admission_dttm,
-  discharge_dttm     = final_discharge_dttm,
-  discharge_name     = final_discharge_name,
-  discharge_category = final_discharge_category
-)]
-
-hosp_map <- clif_hospitalization[, .(
-  old_hosp_id              = hospitalization_id,
-  new_hosp_id              = clif_hospitalizations_joined_id,
-  final_admit              = admission_dttm,
-  final_discharge          = discharge_dttm,
-  final_discharge_name     = discharge_name,
-  final_discharge_category = discharge_category
-)]
-
-clif_hospitalization <- clif_hospitalization_start |>
-  group_by(patient_id) |>
-  arrange(patient_id, admission_dttm) |>
-  filter(link_number == 1 | is.na(link_number)) |>
-  collect() |>
-  mutate(encounter_block = row_number()) |>
-  rowbind(df_link, fill = TRUE) |>
-  group_by(patient_id) |>
-  arrange(patient_id, admission_dttm) |>
-  fill(encounter_block, .direction = "down") |>
-  ungroup() |>
-  group_by(patient_id, encounter_block) |>
-  mutate(
-    final_admission_dttm     = if_else(row_number() == 1,  admission_dttm,    NA_POSIXct_),
-    final_discharge_dttm     = if_else(row_number() == n(), discharge_dttm,   NA_POSIXct_),
-    final_discharge_name     = if_else(row_number() == n(), discharge_name,    NA_character_),
-    final_discharge_category = if_else(row_number() == n(), discharge_category, NA_character_)
-  ) |>
-  mutate(clif_hospitalizations_joined_id = cur_group_id()) |>
-  fill(starts_with("final_"), .direction = "updown") |>
-  dplyr::select(
-    clif_hospitalizations_joined_id,
-    hospitalization_id,
-    patient_id,
-    encounter_block,
-    age_at_admission,
-    admission_dttm       = final_admission_dttm,
-    discharge_dttm       = final_discharge_dttm,
-    discharge_name       = final_discharge_name,
-    discharge_category   = final_discharge_category
-  ) |>
-  ungroup()
-
-hosp_map <- clif_hospitalization |>
-  as_tibble() |>
-  dplyr::select(
-    old_hosp_id              = hospitalization_id,
+# Build hosp_map crosswalk for downstream remapping in read_data()
+hosp_map <- clif_hospitalization_start[
+  clif_hospitalization,
+  on = .(patient_id, encounter_block),
+  .(
+    old_hosp_id              = x.hospitalization_id,
     new_hosp_id              = clif_hospitalizations_joined_id,
-    final_admit              = admission_dttm,
-    final_discharge          = discharge_dttm,
-    final_discharge_name     = discharge_name,
-    final_discharge_category = discharge_category
+    final_admit              = i.admission_dttm,
+    final_discharge          = i.discharge_dttm,
+    final_discharge_name     = i.discharge_name,
+    final_discharge_category = i.discharge_category
   )
-
+]
 ```
+
 
 # PART ONE: Upload clif tables
 ```{r}
@@ -489,7 +403,7 @@ language_name_category_combos <- unique(patient_demographics[,
 fwrite(language_name_category_combos, 
   file.path(cohort_characteristics, paste0(institution, "_language_name_category_qc.csv")))
 
-#ADT
+#ADT 
 adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
 setorder(adt, hospitalization_id, in_dttm) 
 
@@ -505,7 +419,7 @@ patient_assessments <- unique(patient_assessments, by = c("hospitalization_id", 
 patient_assessments[, assessment_category := tolower(assessment_category)]
 
 #Elixhauser
-hospital_diagnosis <- as.data.table(read_data(paste0(data_dir,"clif_hospital_diagnosis", file_type), select = c("hospitalization_id", "diagnosis_code", "diagnosis_code_format")))
+hospital_diagnosis <- as.data.table(read_data(paste0(data_dir,"clif_hospital_diagnosis", file_type), select = c("hospitalization_id", "diagnosis_code")))
 setorder(hospital_diagnosis, hospitalization_id)
 
 #Labs
@@ -1009,15 +923,6 @@ trach_imv_runs <- merge(
   all = TRUE
 )
 
-# Need to calculate imv_duration_hours_trach variable for non-reintubated patients
-trach_imv_runs[, imv_duration_hours_trach :=
-  ifelse(
-    reintubation == 0 & !is.na(trach_this_admission_dttm),
-    as.numeric(difftime(trach_this_admission_dttm, begin_imv, units = "hours")),
-    NA_real_
-  )
-]
-
 # Flag for trached prior to IMV
 trach_imv_runs[, trached_before_imv := as.integer(
   (!is.na(trach_this_admission_dttm) & !is.na(begin_imv) & trach_this_admission_dttm <= begin_imv) |
@@ -1038,7 +943,6 @@ trach_imv_runs <- trach_imv_runs[, .(
   run_id,
   first_trach_dttm = trach_this_admission_dttm,
   most_recent_trach_before_admission,
-  imv_duration_hours_trach,
   trached_before_imv,
   trached
 )]
@@ -1881,7 +1785,7 @@ hosp_time_rass_closest <- hosp_time_rass[time_to_first_rass >= -1,
                                          by = hospitalization_id]
 
 # Clean Out Those with RASS Values Not Documented within 8 hours of IMVs
-time_to_first_rass_final <- hosp_time_rass_closest#[time_to_first_rass >= -1 & time_to_first_rass <= 8]
+time_to_first_rass_final <- hosp_time_rass_closest
 time_to_first_rass_final[time_to_first_rass < 0, time_to_first_rass := 0]
 setnames(time_to_first_rass_final, "recorded_dttm", "first_rass_dttm")
 time_to_first_rass_final <- time_to_first_rass_final[, .(hospitalization_id, time_to_first_rass)]
@@ -2379,7 +2283,6 @@ pat_assess_gcs_time_dependent_wide <- dcast(pat_assess_gcs_time_dependent,
                    fun.aggregate = mean,
                    fill = NA)
 setorder(pat_assess_gcs_time_dependent_wide, hospitalization_id, recorded_dttm)
-pat_assess_gcs_time_dependent_wide#[, recorded_dttm := as.POSIXct(recorded_dttm, format = "%Y-%m-%d %H:%M:%S", tz = time_zone)]
 
 
 # LAPS2 Score Part 1: Encounter Data
@@ -2403,7 +2306,8 @@ clif_adt_admit <- adt |>
   dplyr::select(hospitalization_id,
                 first_location_category = location_category)
 
-# fixing clif_labs to recorded_dttm
+# fixing clif_labs to recorded_dttm 
+#safety check - should have been changed earlier in code
 if ("lab_collect_dttm" %in% colnames(labs_time_dependent)) {
   labs_time_dependent <- labs_time_dependent |> rename(recorded_dttm = lab_collect_dttm)
 }
@@ -2676,7 +2580,6 @@ df_pre_laps_final <- df_pre_laps_merging |>
 # LAPS2 Score Part 4: Prep LAPS2 Labs (All Days — rolling join, no time filter)
 
 df_encounter_laps2_temp2 <- df_encounter_laps2_temp1[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-labs_time_dependent_2    <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 
 df_laps2_prep1 <-
   df_encounter_laps2_temp2 |>
@@ -3213,6 +3116,8 @@ final_cohort_imv_runs_merge <- rbindlist(
   fill      = TRUE
 )
 
+# Guard against duplicate hospitalization_ids across exact and roll matches
+final_cohort_imv_runs_merge <- unique(final_cohort_imv_runs_merge, by = "hospitalization_id")
 
 # LAPS2 Missing Data Summary
 
@@ -6498,7 +6403,7 @@ resp_wide <- merged_resp_values_24h_final_dedup %>%
 respiratory_support_part_three <- respiratory_support[, .(hospitalization_id, recorded_dttm, device_category, fio2_set, lpm_set)][hospitalization_id %in% final_cohort_imv_runs_reduced$hospitalization_id]
 
 # Merge resp_supp and final_cohort_imv_runs_reduced
-resp_supp_three_merge <- merge(respiratory_support_part_three, final_cohort_imv_runs_reduced, by = "hospitalization_id", all = TRUE)
+resp_supp_three_merge <- merge(respiratory_support_part_three, final_cohort_imv_runs_reduced, by = "hospitalization_id", all.x = TRUE)
 setorder(resp_supp_three_merge, hospitalization_id, recorded_dttm)
 
 # Filter for the 24 hours prior to starting IMV
@@ -6614,7 +6519,7 @@ merged_all_locf <- merged_all_locf %>%
 # Criteria #5: Receipt of any non-invasive ventilation
 merged_all_locf <- merged_all_locf %>%
   mutate(criteria_five_flag = if_else(
-    device_category %in% c("NIPPV", "CPAP"),
+    device_category %in% c("nippv", "cpap"),
     TRUE, FALSE, missing = FALSE
   ))
 
@@ -6645,7 +6550,7 @@ merged_all_locf_final <- merged_all_locf %>%
   ungroup()
 setDT(merged_all_locf_final)
 arf_data <- merged_all_locf_final[, .(hospitalization_id, arf_flag, aHrf_flag)]
-arf_data <- unique(arf_data, by = c("hospitalization_id", "arf_flag", "aHrf_flag"))
+arf_data <- unique(arf_data, by = c("hospitalization_id"))
 ```
 
 #PART SEVEN: Calculate Percent Deep Sedation, Sensitivity Analyses
@@ -6683,7 +6588,7 @@ respiratory_support_time_dependent_wide <- respiratory_support |>
   dplyr::mutate(
     fio2_set = as.numeric(fio2_set),
     lpm_set = as.numeric(lpm_set),
-    fio2_set = if (mean(fio2_set, na.rm = TRUE) > 1) fio2_set / 100 else fio2_set,
+    fio2_set = if (mean(fio2_set, na.rm = TRUE) > 1) fio2_set / 100 else fio2_set, #Deliberate column check instead of row-wise 
     fio2_set = ifelse(fio2_set >= 0.21 & fio2_set <= 1, fio2_set, NA_real_),
     lpm_set = ifelse(lpm_set >= 0 & lpm_set <= 60, lpm_set, NA_real_)
   )
@@ -6827,7 +6732,6 @@ total_timeline_primary[, (cols_to_update_imv_total) := lapply(.SD, function(x) f
 # Determine worst P/F ratio in first 12 hours of IMV
 # With plausibility filtering, missingness auditing, and multiple imputation
 ###############################################################################
-library(mice)
 
 setDT(total_timeline_primary)
 setorder(total_timeline_primary, hospitalization_id, recorded_dttm)
@@ -6948,7 +6852,7 @@ pf_worst_12h <- pf_candidates_12h[
       .(
         pf_selected      = NA_real_,
         pf_source        = "no_valid_pf",
-        pf_recorded_dttm = NA_POSIXct_,
+        pf_recorded_dttm = as.POSIXct(NA),
         p_to_f           = NA_real_,
         p_to_f_imputed   = NA_real_
       )
@@ -6974,6 +6878,9 @@ summary_meds_data_final <- merge(
 ################################################################################
 ###############################################################################
 
+# NOTE: total_timeline_primary is modified in place by the LOCF step below.
+# total_timeline_filt (used as base for sensitivity) must be merged BEFORE
+# this line to avoid inheriting the LOCF'd values.
 total_timeline_locf_primary <- total_timeline_primary[, (cols_to_update_imv_total) := lapply(.SD, function(x) na.locf(x, na.rm = FALSE)), 
                  by = hospitalization_id, .SDcols = cols_to_update_imv_total]
 
@@ -6994,9 +6901,6 @@ total_timeline_hourly_primary <- total_timeline_locf_primary_filt[,
 ###############################################################################
 #### SENSITIVITY SECTION ###
 total_timeline_hourly_primary <- as.data.frame(total_timeline_hourly_primary)
-
-# Define columns to plot
-columns_to_plot <- c("rass_value", "po2_arterial", "fio2_combined", "pao2_imputed")
 
 #Sensitivity Analysis Numbers
 cols_to_update_imv_sensitivity <- c("hour_imv", "rass_value")
@@ -7033,10 +6937,6 @@ total_timeline_hourly_sensitivity <- total_timeline_hourly_sensitivity[, .(hospi
 
 setDT(total_timeline_hourly_primary)
 
-# Calculate P/F Ratio
-total_timeline_hourly_primary[, p_to_f := po2_arterial / fio2_combined]
-total_timeline_hourly_primary[, p_to_f_imputed := pao2_imputed / fio2_combined]
-
 # Deep Sedation Flag 
 total_timeline_hourly_rass_filter <- total_timeline_hourly_primary[, 
   deep_sedation_hourly := fifelse(is.na(rass_value), NA, fifelse(rass_value <= -3, TRUE, FALSE))
@@ -7055,8 +6955,6 @@ deep_sedation_count_total_72 <- timeline_72h_no_first_four[
   by = hospitalization_id
 ]
 setnames(deep_sedation_count_total_72, "N", "deep_sedation_count_total_72")
-deep_sedation_count_total_72[, deep_sedation_count_total_72 := deep_sedation_count_total_72]
-
 
 row_count_minus_one_72 <- timeline_72h_no_first_four[
   , .(hours_mechanically_ventilated_72 = .N), 
@@ -7083,8 +6981,6 @@ deep_sedation_count_total_48 <- timeline_48h_no_first_four[
   by = hospitalization_id
 ]
 setnames(deep_sedation_count_total_48, "N", "deep_sedation_count_total_48")
-deep_sedation_count_total_48[, deep_sedation_count_total_48 := deep_sedation_count_total_48]
-
 
 row_count_48 <- timeline_48h_no_first_four[
   , .(hours_mechanically_ventilated_48 = .N), 
@@ -7117,8 +7013,6 @@ deep_sedation_count_total_48_sensitivity <- timeline_48h_no_first_four_sensitivi
   by = hospitalization_id
 ]
 setnames(deep_sedation_count_total_48_sensitivity, "N", "deep_sedation_count_total_48_sensitivity")
-deep_sedation_count_total_48_sensitivity[, deep_sedation_count_total_48_sensitivity := deep_sedation_count_total_48_sensitivity]
-
 
 row_count_minus_one_48_sensitivity <- timeline_48h_no_first_four_sensitivity[
   , .(hours_mechanically_ventilated_48_sensitivity = .N), 
@@ -7227,7 +7121,11 @@ if (length(vars_with_missing) == 0 && length(missing_from_data) == 0) {
   message("✓ Your table is clean - proceed to 01_analysis!")
 }
 
-rm(vars_to_check, missing_from_data, vars_present, missingness_summary, vars_with_missing)
+# Clean up temporary QC objects from the environment.
+# suppressWarnings() prevents "object not found" errors if a collaborator's
+# run errored mid-block and some of these were never created.
+suppressWarnings(rm(vars_to_check, missing_from_data, vars_present, 
+                    missingness_summary, vars_with_missing))
 # ─────────────────────────────────────────────────────────────
 
 write_parquet(primary_analysis_analytic, paste0(intermediate_dir, "analytic_file", institution, ".parquet"))

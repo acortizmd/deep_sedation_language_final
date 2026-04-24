@@ -5,7 +5,7 @@
 ```{r setup}
 # Install Packages
 
-packages <- c("tidyverse", "zoo", "data.table", "dplyr", "lubridate", "tidyr", "fst", "arrow", "table1", "lme4", "metafor", "yaml", "pscl", "MASS", "htmltools", "car", "WeightIt", "MatchIt", "purrr", "survival", "mediation", "cmprsk", "gfoRmula", "nnet", "medflex", "bruceR", "survey", "ipw", "geepack", "readr", "collapse", "stringr", "rprojroot", "tableone", "lmtest", "mice")
+packages <- c("tidyverse", "zoo", "data.table", "dplyr", "lubridate", "tidyr", "fst", "arrow", "table1", "lme4", "metafor", "yaml", "pscl", "MASS", "htmltools", "car", "WeightIt", "MatchIt", "purrr", "survival", "mediation", "cmprsk", "gfoRmula", "nnet", "medflex", "bruceR", "survey", "ipw", "geepack", "readr", "collapse", "stringr", "rprojroot", "tableone", "lmtest", "broom")
 install_if_missing <- function(package) {
   if (!require(package, character.only = TRUE)) {
     install.packages(package, dependencies = TRUE)
@@ -32,10 +32,9 @@ library(pscl)
 library(car)
 library(stringr)
 library(rprojroot)
-library(jsonlite)
 library(tableone)
 library(lmtest)
-library(mice)
+library(broom)
 
 
 # Define paths
@@ -1891,28 +1890,6 @@ exploratory_model_mme_results <- data.frame(
 
 # Save the results to a file
 fwrite(exploratory_model_mme_results, file.path(sedation_exploratory, paste0(institution, "_exploratory_analysis_mme_total.csv")))
-
-############################
-# Race x Language Interaction
-primary_model_race_language_interaction <- lm(
-  percent_deep_sedation_48 ~ lang_cat_6 * race_category + age_category + 
-    sex_category + bmi + factor(hospital_icu_id) + elixhauser_score + 
-    SVM_SCORE + laps2 + factor(observation_year),
-  data = primary_cohort
-)
-summary(primary_model_race_language_interaction)
-
-primary_model_race_language_interaction_results <- data.frame(
-  term = names(coef(primary_model_race_language_interaction)),
-  estimate = coef(primary_model_race_language_interaction),
-  std.error = summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"],
-  variance = (summary(primary_model_race_language_interaction)$coefficients[, "Std. Error"])^2,
-  p.value = summary(primary_model_race_language_interaction)$coefficients[, "Pr(>|t|)"]
-)
-
-fwrite(primary_model_race_language_interaction_results, 
-       file.path(sedation_final_data, paste0(institution, "_primary_model_race_language_interaction.csv")))
-
 ```
 
 # Step 6: Sensitivity and Sub-Group Analyses That Require Filtering Primary Cohort
