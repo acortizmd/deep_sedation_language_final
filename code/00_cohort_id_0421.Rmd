@@ -1268,6 +1268,7 @@ adt_int <- copy(adt_imv)[
   , `:=`(adt_start = in_dttm, adt_end = out_dttm)
 ]
 
+adt_int <- adt_int[!is.na(adt_start) & !is.na(adt_end)]
 setkey(adt_int, hospitalization_id, adt_start, adt_end)
 
 overlaps <- foverlaps(
