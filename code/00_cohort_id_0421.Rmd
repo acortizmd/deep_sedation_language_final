@@ -488,7 +488,7 @@ hospital_days <- imv_hospitalizations_full_hx[, {
     hospitalization_id = hospitalization_id,
     patient_id = patient_id,
     hospital_day_id = seq_len(n_days),
-    calendar_date = all_dates,
+    calendar_date = as.Date(as.numeric(all_dates), origin = "1970-01-01"),
     day_start_time = day_start_time,
     day_end_time = day_end_time
   )
