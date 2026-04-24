@@ -300,6 +300,52 @@ make_table1_federated <- function(dt,
       n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
   out[variable_type == "continuous" & n < 10,
       n := NA_real_]
+
+  #-----------------------------#
+  # COMPLEMENTARY SUPPRESSION
+  #-----------------------------#
+  cat_out <- out[variable_type == "categorical"]
+  if (nrow(cat_out) > 0) {
+    suppressed_combos <- unique(cat_out[
+      n_censored == "<10",
+      .(variable, group)
+    ])
+    
+    if (nrow(suppressed_combos) > 0) {
+      suppressed_combos[, suppress_flag := TRUE]
+      out <- merge(out, suppressed_combos, by = c("variable", "group"), all.x = TRUE)
+      
+      out[variable_type == "categorical" & !is.na(suppress_flag),
+          `:=`(
+            pct        = NA_real_,
+            n_censored = ifelse(n_censored == "<10", "<10", "suppressed"),
+            n          = NA_real_
+          )]
+      
+      out[, suppress_flag := NULL]
+    }
+  }
+
+  cont_out <- out[variable_type == "continuous"]
+  if (nrow(cont_out) > 0) {
+    suppressed_cont_vars <- cont_out[
+      n_censored == "<10",
+      unique(variable)
+    ]
+    
+    if (length(suppressed_cont_vars) > 0) {
+      out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
+          `:=`(
+            mean       = NA_real_,
+            sd         = NA_real_,
+            median     = NA_real_,
+            p25        = NA_real_,
+            p75        = NA_real_,
+            n_censored = ifelse(n_censored == "<10", "<10", "suppressed"),
+            n          = NA_real_
+          )]
+    }
+  }
   
   return(out[])
 }
@@ -568,11 +614,11 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
   # Suppress all statistics when either group is below threshold
   out[group1_n < 10 | group2_n < 10,
       `:=`(
-        estimate  = NA_real_,
-        ci_lower  = NA_real_,
-        ci_upper  = NA_real_,
-        p_value   = NA_real_,
-        smd       = NA_real_,
+        estimate      = NA_real_,
+        ci_lower      = NA_real_,
+        ci_upper      = NA_real_,
+        p_value       = NA_real_,
+        smd           = NA_real_,
         group1_mean   = NA_real_,
         group2_mean   = NA_real_,
         group1_sd     = NA_real_,
@@ -583,12 +629,56 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
         group2_p25    = NA_real_,
         group1_p75    = NA_real_,
         group2_p75    = NA_real_,
-        note = "Suppressed: cell size < 10"
+        note          = "Suppressed: cell size < 10"
       )]
   
   # Suppress raw counts after creating censored versions
   out[group1_n < 10, group1_n := NA_real_]
   out[group2_n < 10, group2_n := NA_real_]
+
+  #-----------------------------#
+  # COMPLEMENTARY SUPPRESSION
+  #-----------------------------#
+  # In the comparisons table, the structure is one row per variable-comparison pair
+  # (not per level), so if either group_n is suppressed we suppress the whole
+  # variable-comparison combination, which the censoring block above already does.
+  # The additional step here suppresses variables entirely if they appear in ANY
+  # suppressed comparison, preventing back-calculation across comparisons.
+
+  suppressed_vars <- out[
+    group1_n_censored == "<10" | group2_n_censored == "<10",
+    unique(variable)
+  ]
+
+  if (length(suppressed_vars) > 0) {
+    out[variable %in% suppressed_vars,
+        `:=`(
+          estimate      = NA_real_,
+          ci_lower      = NA_real_,
+          ci_upper      = NA_real_,
+          p_value       = NA_real_,
+          smd           = NA_real_,
+          group1_mean   = NA_real_,
+          group2_mean   = NA_real_,
+          group1_sd     = NA_real_,
+          group2_sd     = NA_real_,
+          group1_median = NA_real_,
+          group2_median = NA_real_,
+          group1_p25    = NA_real_,
+          group2_p25    = NA_real_,
+          group1_p75    = NA_real_,
+          group2_p75    = NA_real_,
+          group1_n_censored = ifelse(group1_n_censored == "<10", "<10", "suppressed"),
+          group2_n_censored = ifelse(group2_n_censored == "<10", "<10", "suppressed"),
+          group1_n      = NA_real_,
+          group2_n      = NA_real_,
+          note          = ifelse(
+            is.na(note) | note == "",
+            "Suppressed: complementary cell size < 10",
+            note
+          )
+        )]
+  }
 
   desired_order <- c(
     "site", "variable", "variable_type", "comparison", "level",
