@@ -137,7 +137,7 @@ total_cohort[
 ]
 total_cohort[, observation_year := as.double(observation_year)]
 # Upload hospital system language information
-language_data <- fread(paste0(cohort_characteristics, institution, "_hospital_system_language_counts", ".csv"))
+language_data <- fread(paste0(cohort_characteristics, "/", institution, "_hospital_system_language_counts", ".csv"))
 setDT(language_data)
 
 cat_vars <- c("sex_category", "ethnicity_category", "race_category", "hospital_id", "icu_imv", "location_of_intubation", "admission_type_category", "arf_flag", "aHrf_flag")
@@ -1848,6 +1848,12 @@ full_48hr_cohort[, ipw := pmin(pmax(ipw, ipw_q[1]), ipw_q[2])]
 full_48hr_cohort$lang_cat_6 <- relevel(as.factor(full_48hr_cohort$lang_cat_6), ref = "english")
 full_48hr_cohort$sex_category <- relevel(as.factor(full_48hr_cohort$sex_category), ref = "male")
 full_48hr_cohort$race_category <- relevel(as.factor(full_48hr_cohort$race_category), ref = "white")
+
+full_48hr_cohort_descriptive <- make_table1_federated(dt = full_48hr_cohort, cat_vars = cat_vars, cont_vars = cont_vars, by = "lang_cat_6", site_name = institution)
+fwrite(full_48hr_cohort_descriptive, file.path(sedation_tables_dir, paste0(institution, "_table1_full_48hr_cohort_descriptive.csv")))
+
+full_48hr_cohort_comparisons <- make_table1_comparisons(dt = full_48hr_cohort, by = "lang_cat_6", reference_level = "english", cont_vars = cont_vars, cat_vars = cat_vars, site_name = institution)
+fwrite(no_unknown_ethnicity_cohort_comparisons, file.path(sedation_tables_dir, paste0(institution, "_table1_full_48hr_cohort_comparisons.csv")))
 
 tryCatch({
   sensitivity_model_full_48 <- lm(
