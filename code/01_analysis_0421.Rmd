@@ -1195,7 +1195,7 @@ tryCatch({
 }, error = function(e) {
   message("Skipping primary_model_adjusted model: ", conditionMessage(e))
 })
-
+summary(primary_model_adjusted)
 ################################################################################
 # Secondary Analyses
 ################################################################################
@@ -4808,3 +4808,720 @@ fwrite(filter_tab_measurements_project,
 
 ```
   
+# Eval for RUSH
+# Diagnostic: Why did the language effect on % deep sedation go null?
+```{r diagnostic-language-shift}
+################################################################################
+# DIAGNOSTIC: Language effect on % deep sedation
+#
+# Tests four hypotheses for why the new pipeline produced a near-null effect of
+# preferred language on percent deep sedation while the absolute count
+# (deep_sedation_count_total_48) remained meaningful:
+#
+#   1. Inclusion criteria broadening (IMV >= 24h -> IMV >= 4h) added short-
+#      duration patients who dilute the percent.
+#   2. Missing paralytic-period RASS scrubbing in the new code inflates the
+#      denominator with non-deep-sedation hours that are clinically implausible.
+#   3. Adjusting for observation_year in the new model absorbs the language
+#      signal.
+#   4. Hour 4 boundary handling differs between codes (> 4 vs >= 4), changing
+#      denominators for short-duration patients.
+#
+# Outputs are written to a new "sedation_diagnostic" subfolder of the sedation
+# project for easy comparison.
+################################################################################
+
+# ---- Folder for diagnostic outputs ----
+sedation_diagnostic <- file.path(sedation_final_data, "diagnostic_language_shift/")
+dir.create(sedation_diagnostic, recursive = TRUE, showWarnings = FALSE)
+
+# Use the same primary cohort the main analysis uses
+diag_cohort <- copy(primary_cohort)
+
+# Convenience flag for diagnostic stratification
+diag_cohort[, lang_2 := fifelse(lang_cat_6 == "english", "english", "spanish")]
+
+# Reuse the same RHS the primary model uses (without lang_cat_6 — added per call)
+covariates_full <- c(
+  "race_category",
+  "age_category",
+  "sex_category",
+  "bmi",
+  "factor(hospital_icu_id)",
+  "elixhauser_score",
+  "SVM_SCORE",
+  "laps2",
+  "factor(observation_year)"
+)
+
+# Same RHS but without observation_year for hypothesis 3
+covariates_no_year <- setdiff(covariates_full, "factor(observation_year)")
+
+fit_pct_model <- function(outcome, data, covars) {
+  fml <- as.formula(paste(
+    outcome, "~ lang_cat_6 +", paste(covars, collapse = " + ")
+  ))
+  tryCatch(lm(fml, data = data), error = function(e) {
+    message("  model failed: ", conditionMessage(e)); NULL
+  })
+}
+
+extract_lang_rows <- function(model, label) {
+  if (is.null(model)) return(NULL)
+  res <- extract_lm_results(model)
+  res <- res[grepl("lang_cat_6", res$term), , drop = FALSE]
+  if (nrow(res) == 0) return(NULL)
+  res$scenario <- label
+  res$n_obs    <- length(model$residuals)
+  res
+}
+
+# Helper: censor cells with n<10 before writing
+censor_n <- function(dt, cols) {
+  for (c in cols) {
+    if (c %in% names(dt)) {
+      dt[, (paste0(c, "_censored")) := fifelse(get(c) < 10, "<10",
+                                               as.character(get(c)))]
+      dt[get(c) < 10, (c) := NA_integer_]
+    }
+  }
+  dt
+}
+
+################################################################################
+# 1. IMV duration distribution overall and by language
+################################################################################
+diag_cohort[, imv_bin := cut(
+  imv_duration_hours_final,
+  breaks = c(0, 12, 24, 48, 72, Inf),
+  right  = FALSE,
+  include.lowest = TRUE
+)]
+
+imv_dist_overall <- diag_cohort[, .N, by = imv_bin][order(imv_bin)]
+imv_dist_by_lang <- dcast(
+  diag_cohort[, .N, by = .(imv_bin, lang_2)],
+  imv_bin ~ lang_2, value.var = "N", fill = 0
+)[order(imv_bin)]
+
+imv_dist_overall <- censor_n(imv_dist_overall, "N")
+imv_dist_by_lang <- censor_n(imv_dist_by_lang, c("english", "spanish"))
+
+fwrite(imv_dist_overall,
+       file.path(sedation_diagnostic,
+                 paste0(institution, "_diag_imv_distribution_overall.csv")))
+fwrite(imv_dist_by_lang,
+       file.path(sedation_diagnostic,
+                 paste0(institution, "_diag_imv_distribution_by_language.csv")))
+
+################################################################################
+# 2. Hypothesis 3: model with vs without observation_year (cheapest test)
+################################################################################
+mod_with_year <- fit_pct_model("percent_deep_sedation_48", diag_cohort, covariates_full)
+mod_no_year   <- fit_pct_model("percent_deep_sedation_48", diag_cohort, covariates_no_year)
+
+results_year <- rbind(
+  extract_lang_rows(mod_with_year, "with_observation_year"),
+  extract_lang_rows(mod_no_year,   "without_observation_year")
+)
+
+if (!is.null(results_year)) {
+  fwrite(results_year,
+         file.path(sedation_diagnostic,
+                   paste0(institution, "_diag_h3_observation_year.csv")))
+}
+
+################################################################################
+# 3. Hypothesis 1: restrict to IMV >= 24h to match old inclusion criteria
+################################################################################
+diag_ge24 <- diag_cohort[imv_duration_hours_final >= 24]
+
+mod_ge24_with_year <- fit_pct_model("percent_deep_sedation_48", diag_ge24, covariates_full)
+mod_ge24_no_year   <- fit_pct_model("percent_deep_sedation_48", diag_ge24, covariates_no_year)
+
+results_inclusion <- rbind(
+  extract_lang_rows(mod_ge24_with_year, "imv_ge24_with_year"),
+  extract_lang_rows(mod_ge24_no_year,   "imv_ge24_without_year")
+)
+
+if (!is.null(results_inclusion)) {
+  fwrite(results_inclusion,
+         file.path(sedation_diagnostic,
+                   paste0(institution, "_diag_h1_imv_ge24h.csv")))
+}
+
+# Stratified summary by IMV bin and language (with <10 censoring on n)
+strat_summary <- diag_cohort[, .(
+  n              = .N,
+  mean_pct_ds    = mean(percent_deep_sedation_48,        na.rm = TRUE),
+  median_pct_ds  = median(percent_deep_sedation_48,      na.rm = TRUE),
+  mean_count_ds  = mean(deep_sedation_count_total_48,    na.rm = TRUE),
+  mean_hrs_obs   = mean(hours_mechanically_ventilated_72, na.rm = TRUE)
+), by = .(imv_bin, lang_2)][order(imv_bin, lang_2)]
+
+strat_summary[, n_censored := fifelse(n < 10, "<10", as.character(n))]
+strat_summary[n < 10, `:=`(
+  n              = NA_integer_,
+  mean_pct_ds    = NA_real_,
+  median_pct_ds  = NA_real_,
+  mean_count_ds  = NA_real_,
+  mean_hrs_obs   = NA_real_
+)]
+
+fwrite(strat_summary,
+       file.path(sedation_diagnostic,
+                 paste0(institution, "_diag_stratified_by_imv_duration.csv")))
+
+################################################################################
+# 4. Hypothesis 2 + 4: rebuild hourly RASS grid and recompute under 4 scenarios
+#
+# IMPORTANT: this rebuild uses an as-of (rolling) join so each grid hour gets
+# the most recent RASS at or before that hour, with a hard look-back limit so
+# stale values don't carry forward indefinitely. This mirrors what the pipeline
+# does internally. With an exact-timestamp merge instead, the grid would be
+# almost entirely empty and LOCF of the imputed hour-0 RASS would saturate
+# every patient, producing nonsense.
+#
+#    Scenario A: new filter (>=4), no paralytic scrub  (= current pipeline)
+#    Scenario B: old filter ( >4), no paralytic scrub
+#    Scenario C: new filter (>=4), WITH paralytic scrub
+#    Scenario D: old filter ( >4), WITH paralytic scrub  (= old behavior)
+################################################################################
+
+# How far back to look for "the most recent RASS" when filling a grid hour.
+# 12h matches the cohort filter (`rass_frequency_hrs <= 12`) and is what the
+# pipeline implicitly tolerates.
+ROLL_HOURS <- 12
+
+# Pull RASS for cohort, parsing categorical/numerical the same way as the
+# pipeline does
+#Fix Hospitalization
+# This block adjusts for hospitalizations that are continuous within a health system.
+# It looks at patient_id, discharge_dttm, and admission_dttm for hospitalization_ids
+# that are close in time, creates new chronological hospitalization_ids, and builds
+# a crosswalk (hosp_map) used by read_data() to remap all downstream tables.
+
+read_data_start <- function(file_path, select = NULL) {
+  if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
+    dt <- fread(file_path, select = select)
+  } else if (grepl("\\.parquet$", file_path)) {
+    if (is.null(select)) {
+      dt <- arrow::read_parquet(file_path)
+    } else {
+      dt <- arrow::read_parquet(file_path, col_select = all_of(select))
+    }
+  } else if (grepl("\\.fst$", file_path)) {
+    if (is.null(select)) {
+      dt <- fst::read_fst(file_path)
+    } else {
+      dt <- fst::read_fst(file_path, columns = all_of(select))
+    }
+  } else {
+    stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
+  }
+
+  dt <- data.table::as.data.table(dt)
+
+  dttm_cols <- names(dt)[grepl("dttm$", names(dt))]
+  local_tz  <- time_zone
+  message("Using timezone: ", local_tz)
+
+  for (var in dttm_cols) {
+    col <- dt[[var]]
+
+    if (inherits(col, "POSIXct")) {
+      existing_tz <- attr(col, "tzone")
+      if (!is.null(existing_tz) && nzchar(existing_tz) && existing_tz == local_tz) {
+        message("✅ ", var, ": tzone already '", local_tz, "', no change")
+        next
+      }
+      if (is.null(existing_tz) || !nzchar(existing_tz) || existing_tz %in% c("UTC", "GMT")) {
+        dt[, (var) := lubridate::force_tz(get(var), tzone = local_tz)]
+        message("🔧 ", var, ": tzone was '", if (is.null(existing_tz)) "(none)" else existing_tz,
+                "', stamped as '", local_tz, "' (no clock shift)")
+        next
+      }
+      warning("⚠️  ", var, ": tzone is '", existing_tz, "', which differs from YAML time_zone '",
+              local_tz, "'. Leaving as-is. Check your source data.")
+      next
+    }
+
+    if (inherits(col, "Date")) {
+      dt[, (var) := lubridate::force_tz(as.POSIXct(get(var)), tzone = local_tz)]
+      message("📅 ", var, ": Date -> POSIXct midnight, stamped as '", local_tz, "'")
+      next
+    }
+
+    raw_vec <- if (is.factor(col)) as.character(col) else col
+    suppressWarnings(parsed <- lubridate::ymd_hms(raw_vec, quiet = TRUE))
+    bad_idx <- is.na(parsed) & !is.na(raw_vec) & nzchar(trimws(raw_vec))
+    if (any(bad_idx)) {
+      suppressWarnings(parsed_date <- lubridate::ymd(raw_vec[bad_idx], quiet = TRUE))
+      parsed[bad_idx] <- as.POSIXct(parsed_date)
+    }
+    dt[, (var) := lubridate::force_tz(parsed, tzone = local_tz)]
+    message("🔧 ", var, ": parsed from character/factor, stamped as '", local_tz, "'")
+  }
+
+  dt %>% glimpse()
+  return(dt)
+}
+
+# Load and clean hospitalization table
+clif_hospitalization_start <-
+  read_data_start(paste0(data_dir, "clif_hospitalization", file_type)) |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, age_at_admission,
+                patient_id, discharge_name, discharge_category) |>
+  mutate(across(where(is.factor), as.character)) |>
+  mutate(across(where(is.character), str_to_lower)) |>
+  as.data.table()
+
+# Identify linked encounters (admissions within 6 hours of a discharge)
+hospital_blocks <- clif_hospitalization_start[, .(patient_id, hospitalization_id, admission_dttm, discharge_dttm)]
+setorder(hospital_blocks, patient_id, admission_dttm)
+
+hospital_blocks[, next_diff_time := as.numeric(difftime(
+  shift(admission_dttm, type = "lead"), discharge_dttm, units = "hours"
+)), by = patient_id]
+
+hospital_blocks[, prev_diff_time := as.numeric(difftime(
+  admission_dttm, shift(discharge_dttm, type = "lag"), units = "hours"
+)), by = patient_id]
+
+hospital_blocks[, linked := as.integer(next_diff_time < 6 | prev_diff_time < 6)]
+
+# Number link groups within patient using cumsum
+hospital_blocks[, link_group := {
+  is_new_group <- is.na(shift(linked)) | linked == 0 |
+                  (linked == 1 & (is.na(prev_diff_time) | prev_diff_time >= 6))
+  cumsum(is_new_group)
+}, by = patient_id]
+
+# Merge link group back to full hospitalization table
+clif_hospitalization_start <- hospital_blocks[
+  clif_hospitalization_start,
+  on = .(patient_id, hospitalization_id)
+]
+
+# Unlinked hospitalizations get their own block
+clif_hospitalization_start[is.na(linked), link_group := .I]
+clif_hospitalization_start[, encounter_block := .GRP, by = .(patient_id, link_group)]
+
+# Collapse to one row per encounter block
+clif_hospitalization <- clif_hospitalization_start[
+  , .(
+    hospitalization_id  = hospitalization_id[1],
+    age_at_admission    = age_at_admission[1],
+    admission_dttm      = admission_dttm[1],
+    discharge_dttm      = discharge_dttm[.N],
+    discharge_name      = discharge_name[.N],
+    discharge_category  = discharge_category[.N]
+  ),
+  by = .(patient_id, encounter_block)
+][, clif_hospitalizations_joined_id := .I]
+
+# Build hosp_map crosswalk for downstream remapping in read_data()
+hosp_map <- clif_hospitalization_start[
+  clif_hospitalization,
+  on = .(patient_id, encounter_block),
+  .(
+    old_hosp_id              = x.hospitalization_id,
+    new_hosp_id              = clif_hospitalizations_joined_id,
+    final_admit              = i.admission_dttm,
+    final_discharge          = i.discharge_dttm,
+    final_discharge_name     = i.discharge_name,
+    final_discharge_category = i.discharge_category
+  )
+]
+
+read_data <- function(file_path, select = NULL) {
+
+  # ---- 1) Read ----
+  if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
+    dt <- data.table::fread(file_path, select = select)
+
+  } else if (grepl("\\.parquet$", file_path)) {
+    if (is.null(select)) {
+      dt <- arrow::read_parquet(file_path)
+    } else {
+      dt <- arrow::read_parquet(file_path, col_select = tidyselect::all_of(select))
+    }
+
+  } else if (grepl("\\.fst$", file_path)) {
+    if (is.null(select)) {
+      dt <- fst::read_fst(file_path)
+    } else {
+      dt <- fst::read_fst(file_path, columns = tidyselect::all_of(select))
+    }
+
+  } else {
+    stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
+  }
+
+  # Convert to data.table early
+  dt <- data.table::as.data.table(dt)
+
+  # ---- 2) Optional remap using hosp_map ----
+  if (exists("hosp_map", envir = .GlobalEnv) && "hospitalization_id" %in% names(dt)) {
+
+    hm <- data.table::as.data.table(get("hosp_map", envir = .GlobalEnv))
+    if (!"old_hosp_id" %in% names(hm)) stop("hosp_map missing old_hosp_id")
+
+    hm[, old_hosp_id := as.character(old_hosp_id)]
+    if ("new_hosp_id" %in% names(hm)) hm[, new_hosp_id := as.character(new_hosp_id)]
+
+    dt[, hospitalization_id := as.character(hospitalization_id)]
+
+    has_dates <- all(c("admission_dttm", "discharge_dttm") %in% names(dt))
+
+    if (has_dates) {
+      message("🔄 remapping hosp_id, admit & discharge")
+      dt <- hm[dt, on = .(old_hosp_id = hospitalization_id)]
+      dt[, hospitalization_id := data.table::fcoalesce(new_hosp_id, old_hosp_id)]
+
+      if ("final_admit"            %in% names(dt)) dt[, admission_dttm      := data.table::fcoalesce(final_admit,            admission_dttm)]
+      if ("final_discharge"        %in% names(dt)) dt[, discharge_dttm      := data.table::fcoalesce(final_discharge,        discharge_dttm)]
+      if ("final_discharge_name"   %in% names(dt)) dt[, discharge_name      := data.table::fcoalesce(final_discharge_name,   discharge_name)]
+      if ("final_discharge_category" %in% names(dt)) dt[, discharge_category := data.table::fcoalesce(final_discharge_category, discharge_category)]
+
+    } else {
+      message("🔄 remapping just hosp_id")
+      dt <- hm[dt, on = .(old_hosp_id = hospitalization_id)]
+      dt[, hospitalization_id := data.table::fcoalesce(new_hosp_id, old_hosp_id)]
+    }
+
+    drop_cols <- intersect(
+      c("new_hosp_id", "old_hosp_id", "final_admit", "final_discharge",
+        "final_discharge_name", "final_discharge_category"),
+      names(dt)
+    )
+    if (length(drop_cols)) dt[, (drop_cols) := NULL]
+  }
+
+  # ---- 3) Normalize all *_dttm columns ----
+  dttm_cols <- names(dt)[grepl("dttm$", names(dt))]
+  local_tz  <- time_zone
+  message("Using timezone: ", local_tz)
+
+  for (var in dttm_cols) {
+
+    col <- dt[[var]]
+
+    # Already POSIXct
+    if (inherits(col, "POSIXct")) {
+      existing_tz <- attr(col, "tzone")
+
+      # Matches YAML tz → leave alone
+      if (!is.null(existing_tz) && nzchar(existing_tz) && existing_tz == local_tz) {
+        message("✅ ", var, ": tzone already '", local_tz, "', no change")
+        next
+      }
+
+      # Blank, NULL, or UTC/GMT → stamp with local_tz, no clock shift
+      if (is.null(existing_tz) || !nzchar(existing_tz) || existing_tz %in% c("UTC", "GMT")) {
+        dt[, (var) := lubridate::force_tz(get(var), tzone = local_tz)]
+        message("🔧 ", var, ": tzone was '", if (is.null(existing_tz)) "(none)" else existing_tz,
+                "', stamped as '", local_tz, "' (no clock shift)")
+        next
+      }
+
+      # Different real timezone → warn and leave alone
+      warning("⚠️  ", var, ": tzone is '", existing_tz, "', which differs from YAML time_zone '",
+              local_tz, "'. Leaving as-is. Check your source data.")
+      next
+    }
+
+    # Date columns
+    if (inherits(col, "Date")) {
+      if (identical(var, "death_dttm")) {
+        dt[, (var) := lubridate::force_tz(
+          as.POSIXct(get(var)) + lubridate::hours(23) + lubridate::minutes(59),
+          tzone = local_tz
+        )]
+        message("📅 ", var, ": Date → POSIXct 23:59, stamped as '", local_tz, "'")
+      } else {
+        dt[, (var) := lubridate::force_tz(as.POSIXct(get(var)), tzone = local_tz)]
+        message("📅 ", var, ": Date → POSIXct midnight, stamped as '", local_tz, "'")
+      }
+      next
+    }
+
+    # Character / factor → parse then stamp
+    raw_vec <- if (is.factor(col)) as.character(col) else col
+
+    suppressWarnings(parsed <- lubridate::ymd_hms(raw_vec, quiet = TRUE))
+
+    bad_idx <- is.na(parsed) & !is.na(raw_vec) & nzchar(trimws(raw_vec))
+    if (any(bad_idx)) {
+      suppressWarnings(parsed_date <- lubridate::ymd(raw_vec[bad_idx], quiet = TRUE))
+      offset <- if (identical(var, "death_dttm")) lubridate::hours(23) + lubridate::minutes(59) else 0
+      parsed[bad_idx] <- as.POSIXct(parsed_date) + offset
+    }
+
+    dt[, (var) := lubridate::force_tz(parsed, tzone = local_tz)]
+    message("🔧 ", var, ": parsed from character/factor, stamped as '", local_tz, "'")
+  }
+
+  # ---- 4) Peek & return ----
+  if (nrow(dt) > 0) utils::str(head(dt))
+  return(dt)
+}
+
+#RASS
+specific_assessment_categories <- c("rass", "RASS")
+patient_assessments <- as.data.table(read_data(paste0(data_dir, "clif_patient_assessments", file_type), select = c("hospitalization_id", "recorded_dttm", "assessment_category", "numerical_value", "categorical_value")))[tolower(assessment_category) %in% specific_assessment_categories]
+patient_assessments <- unique(patient_assessments, by = c("hospitalization_id", "recorded_dttm", "assessment_category"))
+patient_assessments[, assessment_category := tolower(assessment_category)]
+
+#Continuous Meds
+specific_med_groups <- c("vasoactives", "sedation", "paralytics", "analgesia", "paralytic")
+meds <- as.data.table(read_data(paste0(data_dir,"clif_medication_admin_continuous", file_type), select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category")))[med_group %in% specific_med_groups]
+setorder(meds, hospitalization_id, admin_dttm)
+
+#####################
+
+pa_diag <- copy(patient_assessments)
+pa_diag <- pa_diag[
+  hospitalization_id %in% diag_cohort$hospitalization_id &
+    assessment_category == "rass"
+]
+pa_diag[, rass_value := fifelse(
+  !is.na(numerical_value),
+  as.character(as.integer(numerical_value)),
+  fifelse(
+    grepl("^\\+?(-?5|-?4|-?3|-?2|-?1|0|1|2|3|4)$", categorical_value),
+    as.character(as.integer(sub("^\\+", "", categorical_value))),
+    NA_character_
+  )
+)]
+pa_diag <- pa_diag[
+  !is.na(rass_value),
+  .(hospitalization_id, recorded_dttm,
+    rass_value = as.numeric(rass_value))
+]
+setorder(pa_diag, hospitalization_id, recorded_dttm)
+
+# Continuous paralytic admins for cohort
+para_diag <- meds[
+  hospitalization_id %in% diag_cohort$hospitalization_id &
+    med_group %in% c("paralytic", "paralytics") &
+    !is.na(med_dose) & med_dose > 0
+]
+
+# Build hourly grid: hour 0 -> floor(min(48, imv_duration_hours_final))
+diag_cohort[, dur_capped := pmin(48, imv_duration_hours_final)]
+diag_cohort[, dur_capped := pmax(0, dur_capped)]
+
+grid <- diag_cohort[, .(
+  hour_imv      = 0:floor(dur_capped),
+  recorded_dttm = begin_imv + lubridate::hours(0:floor(dur_capped))
+), by = hospitalization_id]
+
+# ---- AS-OF JOIN ----
+# For each (hospitalization_id, grid hour), find the most recent RASS at or
+# before that hour, within ROLL_HOURS.
+setkey(pa_diag,  hospitalization_id, recorded_dttm)
+setkey(grid,     hospitalization_id, recorded_dttm)
+
+# data.table rolling join: roll = ROLL_HOURS*3600 means "carry forward up to
+# that many seconds". Match on grid -> nearest prior pa_diag row.
+rass_grid <- pa_diag[grid,
+                     on = c("hospitalization_id", "recorded_dttm"),
+                     roll = ROLL_HOURS * 3600]
+# After roll join, rass_value is filled for grid rows that had a prior RASS
+# within ROLL_HOURS, NA otherwise.
+
+setorder(rass_grid, hospitalization_id, hour_imv)
+
+# Inject hour-0 imputation only where no real RASS rolled in
+rass_grid[hour_imv == 0 & is.na(rass_value), rass_value := -5]
+
+# After hour-0 imputation, do a *bounded* LOCF: only carry forward over short
+# gaps, not indefinitely. Because the roll join already handled most hours,
+# this LOCF should rarely fire — it's a safety net for short within-window
+# gaps.
+rass_grid[, rass_value := zoo::na.locf(rass_value, na.rm = FALSE),
+          by = hospitalization_id]
+
+# ---- Paralytic-hour flag ----
+# Mark each hour where any continuous paralytic admin occurred in that hour
+# OR the previous hour (admins are documented intermittently while infusion
+# is running, so a single admin row covers an interval that extends forward
+# in time).
+if (nrow(para_diag) > 0) {
+  para_diag[, hour_floor := lubridate::floor_date(admin_dttm, "hour")]
+  para_hours <- unique(para_diag[, .(hospitalization_id, hour_floor)])
+  para_hours <- rbind(
+    para_hours,
+    para_hours[, .(hospitalization_id,
+                   hour_floor = hour_floor + lubridate::hours(1))]
+  )
+  para_hours <- unique(para_hours)
+  para_hours[, paralyzed := TRUE]
+
+  rass_grid[, hour_floor := lubridate::floor_date(recorded_dttm, "hour")]
+  rass_grid <- merge(rass_grid, para_hours,
+                     by = c("hospitalization_id", "hour_floor"),
+                     all.x = TRUE)
+  rass_grid[is.na(paralyzed), paralyzed := FALSE]
+} else {
+  rass_grid[, paralyzed := FALSE]
+}
+
+compute_pct_scenario <- function(grid_dt, hour_filter, scrub_paralytic) {
+  g <- copy(grid_dt)
+  if (scrub_paralytic) {
+    g[paralyzed == TRUE & rass_value > -3, rass_value := NA]
+  }
+  g <- g[hour_filter(hour_imv)]
+  g[, deep := !is.na(rass_value) & rass_value <= -3]
+  g[, .(
+    hours_observed = .N,
+    deep_count     = sum(deep),
+    pct_deep       = 100 * sum(deep) / pmax(.N, 1L)
+  ), by = hospitalization_id]
+}
+
+scenA <- compute_pct_scenario(rass_grid,
+                              function(h) h >= 4, scrub_paralytic = FALSE)
+setnames(scenA, c("hospitalization_id", "obs_A", "cnt_A", "pct_A"))
+
+scenB <- compute_pct_scenario(rass_grid,
+                              function(h) h > 4,  scrub_paralytic = FALSE)
+setnames(scenB, c("hospitalization_id", "obs_B", "cnt_B", "pct_B"))
+
+scenC <- compute_pct_scenario(rass_grid,
+                              function(h) h >= 4, scrub_paralytic = TRUE)
+setnames(scenC, c("hospitalization_id", "obs_C", "cnt_C", "pct_C"))
+
+scenD <- compute_pct_scenario(rass_grid,
+                              function(h) h > 4,  scrub_paralytic = TRUE)
+setnames(scenD, c("hospitalization_id", "obs_D", "cnt_D", "pct_D"))
+
+scenarios <- Reduce(
+  function(x, y) merge(x, y, by = "hospitalization_id", all = TRUE),
+  list(scenA, scenB, scenC, scenD)
+)
+
+diag_cohort_scen <- merge(diag_cohort, scenarios,
+                          by = "hospitalization_id", all.x = TRUE)
+
+# Sanity: pct_A should match pipeline's percent_deep_sedation_48 closely
+# (will not be exactly 1.0 because the simplified rebuild uses ROLL_HOURS-bounded
+# LOCF and a coarser paralytic flag, but should be > 0.9)
+sanity_check <- data.table(
+  metric = c("correlation_A_vs_pipeline",
+             "mean_abs_diff_A_vs_pipeline",
+             "median_abs_diff_A_vs_pipeline",
+             "n_with_both_values",
+             "ROLL_HOURS_used"),
+  value = c(
+    cor(diag_cohort_scen$pct_A,
+        diag_cohort_scen$percent_deep_sedation_48,
+        use = "complete.obs"),
+    mean(abs(diag_cohort_scen$pct_A -
+             diag_cohort_scen$percent_deep_sedation_48),
+         na.rm = TRUE),
+    median(abs(diag_cohort_scen$pct_A -
+               diag_cohort_scen$percent_deep_sedation_48),
+           na.rm = TRUE),
+    sum(!is.na(diag_cohort_scen$pct_A) &
+        !is.na(diag_cohort_scen$percent_deep_sedation_48)),
+    ROLL_HOURS
+  )
+)
+fwrite(sanity_check,
+       file.path(sedation_diagnostic,
+                 paste0(institution, "_diag_scenario_A_vs_pipeline_sanity.csv")))
+
+# Fit each scenario, with full covariates (matches primary model RHS) and
+# again restricted to IMV >= 24h
+results_scenarios <- list()
+
+for (scen in c("A", "B", "C", "D")) {
+  outcome <- paste0("pct_", scen)
+  label   <- paste0("scenario_", scen,
+                    "_filter_",  ifelse(scen %in% c("A","C"), "ge4", "gt4"),
+                    "_paraScrub_",
+                    ifelse(scen %in% c("A","B"), "off", "on"))
+
+  m_all  <- fit_pct_model(outcome, diag_cohort_scen, covariates_full)
+  m_ge24 <- fit_pct_model(outcome,
+                          diag_cohort_scen[imv_duration_hours_final >= 24],
+                          covariates_full)
+
+  rA <- extract_lang_rows(m_all,  paste0(label, "_full_cohort"))
+  rB <- extract_lang_rows(m_ge24, paste0(label, "_imv_ge24h"))
+
+  results_scenarios[[label]] <- rbind(rA, rB)
+}
+
+results_scenarios_dt <- do.call(rbind, results_scenarios)
+if (!is.null(results_scenarios_dt)) {
+  fwrite(results_scenarios_dt,
+         file.path(sedation_diagnostic,
+                   paste0(institution, "_diag_h2_h4_scenarios.csv")))
+}
+
+################################################################################
+# 5. Differential paralytic-RASS contamination by language
+#
+# This audit uses the rebuilt grid to ask: when a patient is paralyzed (per the
+# paralytic-hour flag), how often do we see a documented RASS value > -3 (i.e.,
+# a clinically implausible alert reading on a paralyzed patient)? If this is
+# happening more often in one language group, it would specifically inflate
+# their denominator without inflating their numerator, biasing percent deep
+# sedation toward null in that group.
+################################################################################
+para_audit <- rass_grid[
+  paralyzed == TRUE & !is.na(rass_value),
+  .(
+    n_paralyzed_hours    = .N,
+    n_para_rass_gt_neg3  = sum(rass_value > -3),
+    pct_para_rass_gt_neg3 = 100 * mean(rass_value > -3)
+  ),
+  by = hospitalization_id
+]
+
+para_audit <- merge(
+  para_audit,
+  diag_cohort[, .(hospitalization_id, lang_2)],
+  by = "hospitalization_id", all.x = TRUE
+)
+
+para_audit_summary <- para_audit[, .(
+  n_pts      = .N,
+  median_pct = median(pct_para_rass_gt_neg3, na.rm = TRUE),
+  mean_pct   = mean(  pct_para_rass_gt_neg3, na.rm = TRUE)
+), by = lang_2]
+
+para_audit_summary[, n_pts_censored := fifelse(n_pts < 10, "<10",
+                                               as.character(n_pts))]
+para_audit_summary[n_pts < 10, `:=`(
+  n_pts      = NA_integer_,
+  median_pct = NA_real_,
+  mean_pct   = NA_real_
+)]
+
+fwrite(para_audit_summary,
+       file.path(sedation_diagnostic,
+                 paste0(institution, "_diag_h2_paralytic_rass_by_language.csv")))
+
+################################################################################
+# 6. Compact summary table comparing language coefficients across scenarios
+################################################################################
+all_results <- rbind(
+  results_year,
+  results_inclusion,
+  results_scenarios_dt,
+  fill = TRUE
+)
+
+if (!is.null(all_results)) {
+  fwrite(all_results,
+         file.path(sedation_diagnostic,
+                   paste0(institution, "_diag_summary_all_scenarios.csv")))
+}
+
+message("\n--- Diagnostic complete. Outputs in: ", sedation_diagnostic, "\n")
+```

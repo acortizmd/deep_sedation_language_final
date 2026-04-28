@@ -612,6 +612,7 @@ respiratory_support_imv[, explicit_non_imv :=
   tolower(device_category) != "imv"
 ]
 
+
 # Identify IMV Runs
 imv_runs <- respiratory_support_imv[, {
   n <- .N
