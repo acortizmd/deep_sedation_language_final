@@ -66,6 +66,7 @@ data_dir <- config$data_dir
 local_dir <- config$local_dir
 output_dir <- file.path(local_dir, "output/")
 intermediate_dir <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
+intermediate_diag <- file.path(intermediate_dir, "intermediate_data_diag_DO_NOT_UPLOAD/")
 final_data_dir <- file.path(output_dir, "FINAL_DATA_UPLOAD_ME/")
 cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics")
 sedation_project <- file.path(final_data_dir, "sedation_project")
@@ -73,11 +74,13 @@ paralytics_project <- file.path(final_data_dir, "paralytics_project")
 arf_project <- file.path(final_data_dir, "arf_project/")
 measurements_project <- file.path(final_data_dir, "measurements_project/")
 measurements_tables_dir <- file.path(measurements_project, "final_tables/")  
+diag_compare_dir   <- file.path(final_data_dir,
+                                "diagnostic_old_vs_new_imv_detection/")
 file_type <- config$file_type
 institution <- config$institution
 time_zone <- config$time_zone
 
-dirs_to_create <- c(output_dir, intermediate_dir, final_data_dir, sedation_project, paralytics_project, arf_project, cohort_characteristics, measurements_project, measurements_tables_dir)
+dirs_to_create <- c(output_dir, intermediate_dir, intermediate_diag, diag_compare_dir, final_data_dir, sedation_project, paralytics_project, arf_project, cohort_characteristics, measurements_project, measurements_tables_dir)
 for (dir in dirs_to_create) {
   if (!dir.exists(dir)) {
     dir.create(dir, recursive = TRUE)
@@ -394,15 +397,15 @@ language_counts_hospital_system <- patient_demographics[!language_category %in% 
     N_display = fifelse(N < 10, "less than 10", as.character(N)),
     percent_display = fifelse(N < 10, "less than 10", sprintf("%.1f", percent))
   )][order(-N)]
-fwrite(language_counts_hospital_system[, .(language_category, N = N_display, percent = percent_display)],  file.path(cohort_characteristics, paste0(institution, "_hospital_system_language_counts.csv")))
+#fwrite(language_counts_hospital_system[, .(language_category, N = N_display, percent = percent_display)],  file.path(cohort_characteristics, paste0(institution, "_hospital_system_language_counts.csv")))
 
 # QC Check: All language_name x language_category combinations
 language_name_category_combos <- unique(patient_demographics[, 
   .(language_name, language_category)])[order(language_category, language_name)][,
   institution := institution]
 
-fwrite(language_name_category_combos, 
-  file.path(cohort_characteristics, paste0(institution, "_language_name_category_qc.csv")))
+#fwrite(language_name_category_combos, 
+#  file.path(cohort_characteristics, paste0(institution, "_language_name_category_qc.csv")))
 
 #ADT 
 adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
@@ -614,83 +617,77 @@ respiratory_support_imv[, explicit_non_imv :=
 ]
 
 
-# Identify IMV Runs
+# Identify IMV Runs According to Rule - Two consecutive IMV values in device_category to start IMV time and two consecutive non-IMV values to end IMV time. If end IMV time is not IDed by algorithm then use recorded_dttm from last row (patient likely discharged - either transferred or deceased)
 imv_runs <- respiratory_support_imv[, {
   n <- .N
   run_list <- list()
-  
-  in_run <- FALSE
-  run_id_counter <- 0L
-  run_start <- as.POSIXct(NA)
-  last_imv_time <- as.POSIXct(NA)
-  imv_row_count <- 0L
-  consecutive_non_imv <- 0L  # tracks consecutive explicit non-IMV rows, NA rows don't reset this
-  
-  i <- 1L
+  i <- 1
   
   while (i <= n) {
+    current <- device_category[i]
     
-    if (!in_run && isTRUE(imv_signal[i])) {
-      in_run <- TRUE
-      run_id_counter <- run_id_counter + 1L
-      run_start <- recorded_dttm[i]
-      last_imv_time <- recorded_dttm[i]
-      imv_row_count <- 1L
-      consecutive_non_imv <- 0L
-      i <- i + 1L
-      next
-    }
-    
-    if (in_run) {
-      
-      if (isTRUE(imv_signal[i])) {
-        last_imv_time <- recorded_dttm[i]
-        imv_row_count <- imv_row_count + 1L
-        consecutive_non_imv <- 0L  # reset counter when IMV signal seen again
-        
-      } else if (isTRUE(explicit_non_imv[i])) {
-        consecutive_non_imv <- consecutive_non_imv + 1L  # NA rows leave this unchanged
-      }
-      # NA device_category rows: neither branch fires, consecutive_non_imv unchanged
-      
-      # Stop rule 1: two or more consecutive explicit non-IMV rows (NA rows don't break the streak)
-      two_non_imv <- consecutive_non_imv >= 2L
-      
-      # Stop rule 2: long gap since last positive IMV evidence
-      long_gap <- !is.na(last_imv_time) &&
-        as.numeric(difftime(recorded_dttm[i], last_imv_time, units = "hours")) >= 24
-      
-      if (two_non_imv || long_gap) {
-        run_list[[length(run_list) + 1L]] <- data.table(
-          run_id     = run_id_counter,
-          begin_imv  = run_start,
-          end_imv    = last_imv_time,
-          n_imv_rows = imv_row_count
-        )
-        
-        in_run <- FALSE
-        run_start <- as.POSIXct(NA)
-        last_imv_time <- as.POSIXct(NA)
-        imv_row_count <- 0L
-        consecutive_non_imv <- 0L
+    # Look ahead for second IMV within next few rows (skipping NAs)
+    found_second_imv <- FALSE
+    for (k in (i + 1):n) {
+      if (!is.na(device_category[k]) && device_category[k] == "imv") {
+        found_second_imv <- TRUE
+        break
+      } else if (!is.na(device_category[k]) && device_category[k] != "imv") {
+        break  # Stop looking if we hit a non-NA, non-IMV
       }
     }
     
-    i <- i + 1L
+    if (!is.na(current) && current == "imv" && found_second_imv) {
+      begin_idx <- i
+      begin_imv <- recorded_dttm[begin_idx]
+      
+      # Search for end: 2 consecutive non-IMV/non-NA rows
+      end_idx <- NA
+      trach_flag <- FALSE
+      for (j in (begin_idx + 1):(n - 1)) {
+        dj1 <- device_category[j]
+        dj2 <- device_category[j + 1]
+        
+        cond1 <- !is.na(dj1) && dj1 != "imv"
+        cond2 <- !is.na(dj2) && dj2 != "imv"
+        
+        if (cond1 && cond2) {
+          end_idx <- j
+          if (dj1 == "Trach Collar" || dj2 == "trach collar") {
+            trach_flag <- TRUE
+          }
+          break
+        }
+      }
+      
+      # Use last timestamp if no end found
+      if (is.na(end_idx)) {
+        end_imv <- recorded_dttm[n]
+      } else {
+        end_imv <- recorded_dttm[end_idx]
+      }
+      
+      run_list[[length(run_list) + 1]] <- data.table(
+        hospitalization_id = hospitalization_id[1],
+        begin_imv = begin_imv,
+        end_imv = end_imv
+      )
+      
+      if (trach_flag) break
+      
+      i <- if (!is.na(end_idx)) end_idx + 1 else n + 1
+    } else {
+      i <- i + 1
+    }
   }
   
-  if (in_run) {
-    run_list[[length(run_list) + 1L]] <- data.table(
-      run_id     = run_id_counter,
-      begin_imv  = run_start,
-      end_imv    = last_imv_time,
-      n_imv_rows = imv_row_count
-    )
-  }
-  
-  if (length(run_list) > 0) rbindlist(run_list) else NULL
-  
+  rbindlist(run_list)
 }, by = hospitalization_id]
+
+# Add run_id to filter for first period of IMV
+imv_runs[, `:=`(
+  run_id = seq_len(.N)
+), by = hospitalization_id]
 
 # Define the 28-day window cutoff per hospitalization
 # First IMV start = time zero for the 28-day clock
@@ -729,11 +726,11 @@ imv_runs[, next_begin_imv := NULL]
 imv_runs[, `:=`(
   imv_duration_hours = as.numeric(difftime(end_imv, begin_imv, units = "hours"))
 ), by = hospitalization_id]
-imv_runs <- imv_runs[, .(hospitalization_id, begin_imv, end_imv, time_to_next_imv_hours, imv_duration_hours, run_id, n_imv_rows)]
+imv_runs <- imv_runs[, .(hospitalization_id, begin_imv, end_imv, time_to_next_imv_hours, imv_duration_hours, run_id)]
 
 # Filter out non-real runs
-imv_runs <- imv_runs[!is.na(imv_duration_hours) & imv_duration_hours > 0]
-imv_runs <- imv_runs[n_imv_rows > 2]
+#imv_runs <- imv_runs[!is.na(imv_duration_hours) & imv_duration_hours > 0]
+#imv_runs <- imv_runs[n_imv_rows > 2]
 
 # Create reintubation flag: 1 if >1 run_id in a hospitalization, else 0
 imv_runs[, reintubation :=
@@ -1637,7 +1634,7 @@ language_counts_cohort <- patient_language[
   order(-N)
 ]
 
-fwrite(language_counts_cohort[, .(language_category, N = N_display, percent = percent_display)], file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
+#fwrite(language_counts_cohort[, .(language_category, N = N_display, percent = percent_display)], file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
 
 #Merge Back
 demographics_final <- merge(hospitalization_table_part_five, patient_language, by = "patient_id", all = TRUE)
@@ -2063,8 +2060,8 @@ filter_tab_final <- data.table(
 
 filter_tab_final
 
-fwrite(filter_tab_final, file.path(cohort_characteristics, paste0(institution, "_00_cohort_id_cleaning_summary.csv")))
-fwrite(filter_tab_final, file.path(measurements_tables_dir, paste0(institution, "_00_cohort_id_cleaning_summary.csv")))
+fwrite(filter_tab_final, file.path(diag_compare_dir, paste0(institution, "_00_cohort_id_cleaning_summary.csv")))
+#fwrite(filter_tab_final, file.path(measurements_tables_dir, paste0(institution, "_00_cohort_id_cleaning_summary.csv")))
 ################################################################################
 # Calculate 28d VFDs by hours
 imv_window <- imv_runs_final_clean[, .(
@@ -3192,11 +3189,11 @@ final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(
 )]
 
 # Save missing data summary
-fwrite(laps2_missing_percent,
-       file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
+#fwrite(laps2_missing_percent,
+#       file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
 
 # Save Point
-write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
+write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_diag, "cleaned_cohort_w_laps_diag", institution, ".parquet"))
 ```
 
 # PART FIVE: Calculate Med Doses, Paralytics, etc in First 48 hours of IMV
@@ -3206,7 +3203,7 @@ write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_dir, "cleaned_c
 #time_dependent_vitals <- c("sbp", "dbp", "map", "spo2", "temp_c", "heart_rate", "respiratory_rate")
 #vitals_time_dependent <- vitals[vital_category %in% time_dependent_vitals & hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
 #labs_time_dependent_2 <- labs_time_dependent[hospitalization_id %in% final_cohort_imv_runs$hospitalization_id]
-#final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_dir, "cleaned_cohort_w_laps", institution, ".parquet"))
+#final_cohort_imv_runs_reduced <- read_parquet(paste0(intermediate_diag, "cleaned_cohort_w_laps_diag", institution, ".parquet"))
 
 ################################################################################
 # Define functions to look up meds - robust to missing meds
@@ -7135,5 +7132,495 @@ suppressWarnings(rm(vars_to_check, missing_from_data, vars_present,
                     missingness_summary, vars_with_missing))
 # ─────────────────────────────────────────────────────────────
 
-write_parquet(primary_analysis_analytic, paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
+write_parquet(primary_analysis_analytic, paste0(intermediate_diag, "analytic_file_diag", institution, ".parquet"))
+```
+
+
+# Diagnostic Comparison: Old vs New IMV Detection
+# Author: Alex Ortiz
+#
+# Purpose
+# -------
+# Compare results between two analytic files at the same site:
+#
+#   * analytic_file<institution>.parquet           -- 0421 pipeline (NEW IMV
+#     detection, no IMV>=24h gate, year covariate present)
+#
+#   * analytic_file_diag<institution>.parquet      -- diagnostic pipeline
+#     (OLD IMV detection, otherwise identical to 0421)
+#
+# The original Fall 2025 primary analysis was: OLD detection + IMV >=24h
+# + NO observation_year covariate. Everything else (RASS handling, exclusions,
+# imputation) is held constant by virtue of using the diagnostic-built
+# analytic_file_diag.
+#
+# The script disentangles three simultaneous changes between Fall 2025 and
+# the 0421 pipeline:
+#   (A) IMV detection rewrite
+#   (B) Removal of the IMV >=24h analysis gate
+#   (C) Addition of factor(observation_year) as a covariate
+#
+# All counts are <10-censored before being written. Outputs are intended to
+# be uploaded to the consortium.
+
+# Setup ------------------------------------------------------------------------
+```{r setup, message=FALSE, warning=FALSE}
+packages <- c("data.table", "dplyr", "arrow", "yaml", "rprojroot", "broom",
+              "lmtest", "sandwich", "stringr")
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE)) {
+    install.packages(p, dependencies = TRUE)
+    library(p, character.only = TRUE)
+  }
+}
+invisible(sapply(packages, install_if_missing))
+
+# Resolve project paths from YAML (same convention as 01_analysis_0421)
+#project_root <- file.path(
+#  find_root(rprojroot::has_dir("deep_sedation_language_final")),
+#  "deep_sedation_language_final"
+#)
+#config_dir <- file.path(project_root, "config")
+
+#config_file <- c(
+#  file.path(config_dir, "deep_sedation_language_config.yaml"),
+#  file.path(config_dir, "deep_sedation_language_config.yml")
+#)
+#config_file <- config_file[file.exists(config_file)]
+#if (length(config_file) == 0) stop("No config file found (.yaml or .yml)")
+#config <- yaml::read_yaml(config_file[1])
+
+#local_dir          <- config$local_dir
+#institution        <- config$institution
+
+#intermediate_dir       <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")
+#intermediate_diag_dir  <- file.path(intermediate_dir,
+#                                    "intermediate_data_diag_DO_NOT_UPLOAD/")
+
+#output_dir         <- file.path(local_dir, "output/")
+#final_data_dir     <- file.path(output_dir, "FINAL_DATA_UPLOAD_ME/")
+#diag_compare_dir   <- file.path(final_data_dir,
+#                                "diagnostic_old_vs_new_imv_detection/")
+#dir.create(diag_compare_dir, recursive = TRUE, showWarnings = FALSE)
+
+#cat("Outputs will be written to:\n  ", diag_compare_dir, "\n")
+```
+
+# Load both analytic files ------------------------------------------------------
+```{r load-data}
+new_path <- paste0(intermediate_dir,      "analytic_file",      institution, ".parquet")
+old_path <- paste0(intermediate_diag, "analytic_file_diag", institution, ".parquet")
+
+stopifnot(file.exists(new_path))
+stopifnot(file.exists(old_path))
+
+cohort_new <- as.data.table(arrow::read_parquet(new_path))
+cohort_old <- as.data.table(arrow::read_parquet(old_path))
+
+cat("New analytic file (0421 pipeline): n =", nrow(cohort_new), "\n")
+cat("Old-detection analytic file:       n =", nrow(cohort_old), "\n")
+
+# Both files were built by the 0421 codepath (other than IMV detection), so
+# their column sets should be identical. Sanity check:
+common_cols <- intersect(names(cohort_new), names(cohort_old))
+new_only_cols <- setdiff(names(cohort_new), names(cohort_old))
+old_only_cols <- setdiff(names(cohort_old), names(cohort_new))
+if (length(new_only_cols) > 0)
+  warning("Columns only in new file: ", paste(new_only_cols, collapse = ", "))
+if (length(old_only_cols) > 0)
+  warning("Columns only in old file: ", paste(old_only_cols, collapse = ", "))
+
+# Confirm key columns exist in both
+required_cols <- c("hospitalization_id", "begin_imv", "end_imv",
+                   "imv_duration_hours_final", "percent_deep_sedation_48",
+                   "language_category", "race_category", "age_category", "bmi",
+                   "sex_category", "hospital_icu_id", "elixhauser_score",
+                   "SVM_SCORE", "laps2", "observation_year",
+                   "ethnicity_category")
+missing_new <- setdiff(required_cols, names(cohort_new))
+missing_old <- setdiff(required_cols, names(cohort_old))
+if (length(missing_new) > 0)
+  stop("Missing in new file: ", paste(missing_new, collapse = ", "))
+if (length(missing_old) > 0)
+  stop("Missing in old file: ", paste(missing_old, collapse = ", "))
+```
+
+# Helper functions --------------------------------------------------------------
+```{r helpers}
+# Apply primary-cohort filters EXACTLY as 01_analysis_0421 does.
+# This is necessary because the analytic files are pre-cohort-restriction:
+# the analysis script filters to lang_cat_6 in {english, spanish} and removes
+# hospital_icu_ids without any Spanish speakers.
+build_primary_cohort <- function(dt) {
+  dt <- as.data.table(copy(dt))
+
+  # Only english/spanish
+  dt[, lang_cat_6 := fcase(
+    language_category == "english", "english",
+    language_category == "spanish", "spanish",
+    default = NA_character_
+  )]
+  dt <- dt[!is.na(lang_cat_6)]
+
+  # Drop ICUs that have zero Spanish-preferring patients
+  spanish_icus <- unique(dt[lang_cat_6 == "spanish"]$hospital_icu_id)
+  dt <- dt[hospital_icu_id %in% spanish_icus]
+
+  # Reference levels (match analysis script)
+  dt[, lang_cat_6        := relevel(as.factor(lang_cat_6),        ref = "english")]
+  dt[, sex_category      := relevel(as.factor(sex_category),      ref = "male")]
+  dt[, race_category     := relevel(as.factor(race_category),     ref = "white")]
+  dt[, ethnicity_category := relevel(as.factor(ethnicity_category), ref = "non-hispanic")]
+  dt[]
+}
+
+# Censor counts <10 to "<10"
+censor_n <- function(dt, cols) {
+  for (c in cols) {
+    if (c %in% names(dt)) {
+      dt[, (paste0(c, "_censored")) :=
+           fifelse(get(c) < 10, "<10", as.character(get(c)))]
+      dt[get(c) < 10, (c) := NA_integer_]
+    }
+  }
+  dt
+}
+
+# Fit primary linear model and pull the language coefficient row
+fit_primary <- function(data, include_year, label) {
+  rhs <- c("lang_cat_6", "race_category", "age_category", "sex_category", "bmi",
+           "factor(hospital_icu_id)", "elixhauser_score", "SVM_SCORE", "laps2")
+  if (include_year) rhs <- c(rhs, "factor(observation_year)")
+  fml <- as.formula(paste("percent_deep_sedation_48 ~",
+                          paste(rhs, collapse = " + ")))
+  m <- tryCatch(lm(fml, data = data),
+                error = function(e) { message("model failed: ", conditionMessage(e)); NULL })
+  if (is.null(m)) return(NULL)
+  s <- summary(m)$coefficients
+  rows <- s[grepl("^lang_cat_6", rownames(s)), , drop = FALSE]
+  if (nrow(rows) == 0) return(NULL)
+  data.table(
+    label    = label,
+    term     = rownames(rows),
+    estimate = rows[, "Estimate"],
+    se       = rows[, "Std. Error"],
+    p_value  = rows[, "Pr(>|t|)"],
+    n_obs    = length(m$residuals),
+    n_spanish = sum(data$lang_cat_6 == "spanish", na.rm = TRUE),
+    n_english = sum(data$lang_cat_6 == "english", na.rm = TRUE),
+    include_year = include_year
+  )
+}
+```
+
+# Build primary cohorts under each pipeline ------------------------------------
+```{r build-cohorts}
+primary_new <- build_primary_cohort(cohort_new)
+primary_old <- build_primary_cohort(cohort_old)
+
+cat("Primary cohort (new pipeline): n =", nrow(primary_new), "\n")
+cat("Primary cohort (old detection): n =", nrow(primary_old), "\n")
+
+# Restricted-to-IMV>=24h subsets (matches Fall 2025 primary inclusion)
+primary_new_ge24 <- primary_new[imv_duration_hours_final >= 24]
+primary_old_ge24 <- primary_old[imv_duration_hours_final >= 24]
+
+cat("Primary cohort (new pipeline, IMV>=24h): n =", nrow(primary_new_ge24), "\n")
+cat("Primary cohort (old detection, IMV>=24h): n =", nrow(primary_old_ge24), "\n")
+```
+
+# Block 1: Headline replication of original Fall 2025 primary -----------------
+# Original primary = OLD detection + IMV>=24h + NO factor(observation_year).
+# This is the single most important number in the diagnostic.
+```{r block1-headline}
+headline <- rbind(
+  fit_primary(primary_old_ge24, include_year = FALSE,
+              label = "ORIGINAL_Fall2025: old_detection + imv_ge24h + no_year"),
+  fit_primary(primary_new,       include_year = TRUE,
+              label = "CURRENT_0421:    new_detection + no_duration_filter + year"),
+  fill = TRUE
+)
+
+fwrite(headline,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block1_headline.csv")))
+
+print(headline)
+```
+
+# Block 2: Three-way decomposition (detection x duration filter x year) -------
+# 2 x 2 x 2 = 8 cells. Each row is one configuration of the three switches.
+```{r block2-decomposition}
+configs <- list(
+  list(detection = "old", filter = "all",  year = FALSE, data = primary_old),
+  list(detection = "old", filter = "ge24", year = FALSE, data = primary_old_ge24),
+  list(detection = "old", filter = "all",  year = TRUE,  data = primary_old),
+  list(detection = "old", filter = "ge24", year = TRUE,  data = primary_old_ge24),
+  list(detection = "new", filter = "all",  year = FALSE, data = primary_new),
+  list(detection = "new", filter = "ge24", year = FALSE, data = primary_new_ge24),
+  list(detection = "new", filter = "all",  year = TRUE,  data = primary_new),
+  list(detection = "new", filter = "ge24", year = TRUE,  data = primary_new_ge24)
+)
+
+decomp_results <- rbindlist(lapply(configs, function(cfg) {
+  res <- fit_primary(cfg$data, include_year = cfg$year,
+                     label = sprintf("detection=%s | filter=%s | year=%s",
+                                     cfg$detection, cfg$filter, cfg$year))
+  if (is.null(res)) return(NULL)
+  res[, `:=`(detection = cfg$detection,
+             duration_filter = cfg$filter,
+             year_covariate = cfg$year)]
+  res
+}), fill = TRUE)
+
+# Useful column ordering
+setcolorder(decomp_results, c("label", "detection", "duration_filter",
+                              "year_covariate", "term", "estimate", "se",
+                              "p_value", "n_obs", "n_spanish", "n_english"))
+
+fwrite(decomp_results,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block2_three_way_decomposition.csv")))
+
+print(decomp_results[, .(detection, duration_filter, year_covariate,
+                         term, estimate = round(estimate, 3),
+                         se = round(se, 3), p = round(p_value, 4),
+                         n_obs)])
+```
+
+# Block 3: Entry status -- who moves between detection methods? ----------------
+# Build hospitalization-level membership table for the four cells of
+# (in_old) x (in_new). All counts <10 censored.
+```{r block3-entry-status}
+# Use primary cohorts (so we're comparing apples-to-apples on language scope)
+old_ids <- primary_old$hospitalization_id
+new_ids <- primary_new$hospitalization_id
+all_ids <- union(old_ids, new_ids)
+
+# Pull a small set of fields from each, suffixed
+keep_fields <- c("hospitalization_id", "begin_imv", "end_imv",
+                 "imv_duration_hours_final", "percent_deep_sedation_48",
+                 "lang_cat_6", "race_category", "ethnicity_category",
+                 "hospital_icu_id", "observation_year", "arf_flag",
+                 "language_category")
+
+old_slim <- primary_old[, ..keep_fields]
+new_slim <- primary_new[, ..keep_fields]
+setnames(old_slim, setdiff(names(old_slim), "hospitalization_id"),
+         paste0(setdiff(names(old_slim), "hospitalization_id"), "_old"))
+setnames(new_slim, setdiff(names(new_slim), "hospitalization_id"),
+         paste0(setdiff(names(new_slim), "hospitalization_id"), "_new"))
+
+compare <- merge(old_slim, new_slim, by = "hospitalization_id", all = TRUE)
+compare[, in_old := !is.na(begin_imv_old)]
+compare[, in_new := !is.na(begin_imv_new)]
+compare[, entry_status := fcase(
+  in_old &  in_new, "kept",
+  in_old & !in_new, "old_only",
+  !in_old &  in_new, "new_only",
+  default = NA_character_
+)]
+
+# Use whichever language is non-missing for stratification
+compare[, lang_for_strat := fifelse(!is.na(as.character(lang_cat_6_new)),
+                                    as.character(lang_cat_6_new),
+                                    as.character(lang_cat_6_old))]
+
+# 3a. Membership 2x2, overall and by language
+membership_overall <- compare[, .(n = .N), by = entry_status][order(entry_status)]
+membership_overall <- censor_n(membership_overall, "n")
+
+membership_by_lang <- dcast(
+  compare[, .N, by = .(entry_status, lang_for_strat)],
+  entry_status ~ lang_for_strat, value.var = "N", fill = 0
+)
+# Censor whichever language columns exist
+lang_cols <- setdiff(names(membership_by_lang), "entry_status")
+membership_by_lang <- censor_n(membership_by_lang, lang_cols)
+
+fwrite(membership_overall,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block3a_membership_overall.csv")))
+fwrite(membership_by_lang,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block3b_membership_by_language.csv")))
+
+# 3b. Entry status x IMV duration bin x language
+# Use whichever IMV duration is available (new takes precedence when both)
+compare[, imv_dur_for_strat := fifelse(!is.na(imv_duration_hours_final_new),
+                                       imv_duration_hours_final_new,
+                                       imv_duration_hours_final_old)]
+compare[, imv_bin := cut(
+  imv_dur_for_strat,
+  breaks = c(0, 12, 24, 48, 72, Inf),
+  right  = FALSE,
+  include.lowest = TRUE
+)]
+
+entry_imv_lang <- compare[!is.na(entry_status) & !is.na(imv_bin),
+  .(n = .N,
+    mean_pct_ds_old = mean(percent_deep_sedation_48_old, na.rm = TRUE),
+    mean_pct_ds_new = mean(percent_deep_sedation_48_new, na.rm = TRUE)),
+  by = .(entry_status, imv_bin, lang_for_strat)
+][order(entry_status, imv_bin, lang_for_strat)]
+
+# Censor n; if n<10 also blank out the means
+entry_imv_lang[, n_censored := fifelse(n < 10, "<10", as.character(n))]
+entry_imv_lang[n < 10, `:=`(n = NA_integer_,
+                            mean_pct_ds_old = NA_real_,
+                            mean_pct_ds_new = NA_real_)]
+
+fwrite(entry_imv_lang,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block3c_entry_imv_lang.csv")))
+```
+
+# Block 4: Anchor drift among kept patients ------------------------------------
+# For patients in both cohorts, did begin_imv shift between detection methods?
+# Differential anchor drift by language would by itself reshape the 48h window.
+```{r block4-anchor-drift}
+kept <- compare[entry_status == "kept"]
+kept[, begin_imv_diff_hours := as.numeric(difftime(begin_imv_new, begin_imv_old,
+                                                   units = "hours"))]
+kept[, abs_diff := abs(begin_imv_diff_hours)]
+
+drift_summary_overall <- data.table(
+  group = "overall",
+  n = nrow(kept),
+  median_diff_h    = median(kept$begin_imv_diff_hours, na.rm = TRUE),
+  q25_diff_h       = quantile(kept$begin_imv_diff_hours, 0.25, na.rm = TRUE),
+  q75_diff_h       = quantile(kept$begin_imv_diff_hours, 0.75, na.rm = TRUE),
+  pct_abs_gt_1h    = 100 * mean(kept$abs_diff >  1, na.rm = TRUE),
+  pct_abs_gt_6h    = 100 * mean(kept$abs_diff >  6, na.rm = TRUE),
+  pct_abs_gt_24h   = 100 * mean(kept$abs_diff > 24, na.rm = TRUE)
+)
+
+drift_summary_lang <- kept[!is.na(lang_for_strat),
+  .(n = .N,
+    median_diff_h    = median(begin_imv_diff_hours, na.rm = TRUE),
+    q25_diff_h       = quantile(begin_imv_diff_hours, 0.25, na.rm = TRUE),
+    q75_diff_h       = quantile(begin_imv_diff_hours, 0.75, na.rm = TRUE),
+    pct_abs_gt_1h    = 100 * mean(abs_diff >  1, na.rm = TRUE),
+    pct_abs_gt_6h    = 100 * mean(abs_diff >  6, na.rm = TRUE),
+    pct_abs_gt_24h   = 100 * mean(abs_diff > 24, na.rm = TRUE)),
+  by = .(group = lang_for_strat)
+]
+
+drift_summary <- rbind(drift_summary_overall, drift_summary_lang, fill = TRUE)
+drift_summary[, n_censored := fifelse(n < 10, "<10", as.character(n))]
+drift_summary[n < 10, `:=`(n = NA_integer_,
+                           median_diff_h = NA_real_,
+                           q25_diff_h = NA_real_, q75_diff_h = NA_real_,
+                           pct_abs_gt_1h = NA_real_, pct_abs_gt_6h = NA_real_,
+                           pct_abs_gt_24h = NA_real_)]
+
+fwrite(drift_summary,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block4_anchor_drift_kept.csv")))
+
+# Block 4b: model on kept-only patients with each anchor.
+# This isolates the contribution of anchor change holding cohort fixed.
+# Build language-restored, factor-leveled kept-only frames using each anchor's
+# pct_ds and covariates.
+build_kept_frame <- function(suffix) {
+  cols <- c("hospitalization_id",
+            "lang_cat_6", "race_category", "age_category", "sex_category",
+            "bmi", "hospital_icu_id", "elixhauser_score", "SVM_SCORE",
+            "laps2", "observation_year", "ethnicity_category")
+  cols_suffixed <- paste0(cols, "_", suffix)
+  cols_suffixed[1] <- "hospitalization_id"  # don't suffix the join key
+  # The kept-only IDs
+  ids <- kept$hospitalization_id
+
+  # Pull from the appropriate cohort
+  src <- if (suffix == "old") primary_old else primary_new
+  src <- src[hospitalization_id %in% ids]
+  src <- src[, c("hospitalization_id", "percent_deep_sedation_48",
+                 "lang_cat_6", "race_category", "age_category", "sex_category",
+                 "bmi", "hospital_icu_id", "elixhauser_score", "SVM_SCORE",
+                 "laps2", "observation_year", "ethnicity_category"),
+             with = FALSE]
+  src
+}
+
+kept_old_frame <- build_kept_frame("old")
+kept_new_frame <- build_kept_frame("new")
+
+kept_results <- rbind(
+  fit_primary(kept_old_frame, include_year = FALSE,
+              label = "kept_only | old_anchor | no_year"),
+  fit_primary(kept_old_frame, include_year = TRUE,
+              label = "kept_only | old_anchor | with_year"),
+  fit_primary(kept_new_frame, include_year = FALSE,
+              label = "kept_only | new_anchor | no_year"),
+  fit_primary(kept_new_frame, include_year = TRUE,
+              label = "kept_only | new_anchor | with_year"),
+  fill = TRUE
+)
+
+fwrite(kept_results,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block4b_kept_only_models.csv")))
+```
+
+# Block 5: IMV duration distribution comparison --------------------------------
+# Bins by language, side-by-side for both detection methods. Shows whether
+# the new pipeline is selectively adding short or long IMV episodes, and
+# whether that addition is differentially Spanish.
+```{r block5-imv-distribution}
+make_imv_dist <- function(dt, label) {
+  dt <- copy(dt)
+  dt[, imv_bin := cut(
+    imv_duration_hours_final,
+    breaks = c(0, 12, 24, 48, 72, Inf),
+    right  = FALSE,
+    include.lowest = TRUE
+  )]
+  out <- dt[, .N, by = .(imv_bin, lang_cat_6)]
+  out <- dcast(out, imv_bin ~ lang_cat_6, value.var = "N", fill = 0)
+  out[, source := label]
+  setcolorder(out, "source")
+  out[order(imv_bin)]
+}
+
+dist_old <- make_imv_dist(primary_old, "old_detection")
+dist_new <- make_imv_dist(primary_new, "new_detection")
+
+# Censor language columns
+lang_cols_old <- setdiff(names(dist_old), c("imv_bin", "source"))
+lang_cols_new <- setdiff(names(dist_new), c("imv_bin", "source"))
+dist_old <- censor_n(dist_old, lang_cols_old)
+dist_new <- censor_n(dist_new, lang_cols_new)
+
+dist_combined <- rbind(dist_old, dist_new, fill = TRUE)
+
+fwrite(dist_combined,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block5_imv_distribution.csv")))
+```
+
+# Block 6: One summary CSV pulling the headline numbers together ---------------
+```{r block6-summary}
+# Pull only the Spanish row from each model; produce a single "scorecard" CSV.
+scorecard <- rbindlist(list(
+  headline[grepl("spanish", term)][, source := "block1_headline"],
+  decomp_results[grepl("spanish", term)][, source := "block2_decomposition"],
+  kept_results[grepl("spanish", term)][, source := "block4b_kept_only"]
+), fill = TRUE)
+
+scorecard <- scorecard[, .(source, label, term,
+                           estimate = round(estimate, 3),
+                           se = round(se, 3),
+                           p_value = round(p_value, 4),
+                           n_obs, n_spanish, n_english,
+                           include_year)]
+
+fwrite(scorecard,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block6_scorecard.csv")))
+
+cat("\n========== DIAGNOSTIC SCORECARD ==========\n")
+print(scorecard)
+cat("==========================================\n\n")
+cat("All outputs written to:\n  ", diag_compare_dir, "\n")
 ```
