@@ -1,5 +1,6 @@
-data_dir: "" #location of tables
-local_dir: "" #location of project directory
+data_dir: "" #location of tables - make sure to have "/" at the end
+local_dir: "" #location of project directory - make sure to have "/" at the end
+ats_dir: "" #location of October 2025 ATS Tables - make sure to hvae "/" at the end
 file_type: ".parquet"
 institution: "Penn"
 time_zone: "EST"
