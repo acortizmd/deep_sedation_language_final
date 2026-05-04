@@ -8016,7 +8016,7 @@ if (nrow(drift) > 0) {
 # If they still diverge, then retained-period patients changed too -- meaning
 # the source CLIF was refreshed for previously-existing records.
 ```{r block11-discharge-cutoff}
-cutoff_date <- as.POSIXct("2025-10-01 00:00:00", tz = "UTC")
+cutoff_date <- as.POSIXct("2025-01-01 00:00:00", tz = "CST")
 
 # QC: how many encounters with admission_dttm < cutoff have discharge_dttm
 # >= cutoff? These are encounters that started before the cutoff but extended
