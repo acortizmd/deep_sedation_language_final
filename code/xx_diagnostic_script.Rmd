@@ -64,6 +64,7 @@ config <- yaml::read_yaml(config_file[1])
 # Define directories based on YAML configuration
 data_dir <- config$data_dir
 local_dir <- config$local_dir
+ats_dir <- config$ats_dir
 output_dir <- file.path(local_dir, "output/")
 intermediate_dir <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
 intermediate_diag <- file.path(intermediate_dir, "intermediate_data_diag_DO_NOT_UPLOAD/")
@@ -163,7 +164,7 @@ read_data_start <- function(file_path, select = NULL) {
 
 # Load and clean hospitalization table
 clif_hospitalization_start <-
-  read_data_start(paste0(data_dir, "clif_hospitalization", file_type)) |>
+  read_data_start(paste0(ats_dir, "clif_hospitalization", file_type)) |>
   dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, age_at_admission,
                 patient_id, discharge_name, discharge_category) |>
   mutate(across(where(is.factor), as.character)) |>
@@ -368,14 +369,14 @@ read_data <- function(file_path, select = NULL) {
 
 #Load Raw CLIF Tables
 #Respiratory Support
-respiratory_support <- as.data.table(read_data(paste0(data_dir, "clif_respiratory_support", file_type)))
+respiratory_support <- as.data.table(read_data(paste0(ats_dir, "clif_respiratory_support", file_type)))
 respiratory_support <- unique(respiratory_support, by = c("hospitalization_id", "recorded_dttm"))
 respiratory_support[, device_category := tolower(device_category)]
 respiratory_support[, mode_category := tolower(mode_category)]
 setorder(respiratory_support, hospitalization_id, recorded_dttm) 
 
 #Hospitalization
-hospitalization <- as.data.table(read_data(paste0(data_dir, "clif_hospitalization", file_type)))
+hospitalization <- as.data.table(read_data(paste0(ats_dir, "clif_hospitalization", file_type)))
 hospitalization <- unique(hospitalization, by = "hospitalization_id")
 #Filter Out Incomplete Hospitalizations
 hospitalization <- hospitalization[!is.na(admission_dttm) & !is.na(discharge_dttm) & discharge_dttm >= admission_dttm]
@@ -383,7 +384,7 @@ hospitalization[, admission_type_category := tolower(admission_type_category)]
 hospitalization[, discharge_category := tolower(discharge_category)]
 
 #Patient
-patient_demographics <- as.data.table(read_data(paste0(data_dir,"clif_patient", file_type), select = c("patient_id", "sex_category", "race_category", "ethnicity_category", "death_dttm", "language_name", "language_category")))
+patient_demographics <- as.data.table(read_data(paste0(ats_dir,"clif_patient", file_type), select = c("patient_id", "sex_category", "race_category", "ethnicity_category", "death_dttm", "language_name", "language_category")))
 patient_demographics <- unique(patient_demographics, by = "patient_id")
 patient_demographics[, language_category := tolower(language_category)]
 patient_demographics[, sex_category := tolower(sex_category)]
@@ -408,40 +409,40 @@ language_name_category_combos <- unique(patient_demographics[,
 #  file.path(cohort_characteristics, paste0(institution, "_language_name_category_qc.csv")))
 
 #ADT 
-adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
+adt <- as.data.table(read_data(paste0(ats_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "in_dttm", "out_dttm", "location_category", "location_type")))
 setorder(adt, hospitalization_id, in_dttm) 
 
 #Vitals
 vital_cats <- tolower(trimws(c("height_cm","weight_kg","sbp","dbp","map",
                              "spo2","temp_c","heart_rate","respiratory_rate")))
-vitals <- as.data.table(read_data(paste0(data_dir, "clif_vitals", file_type)))[vital_category %in% vital_cats]
+vitals <- as.data.table(read_data(paste0(ats_dir, "clif_vitals", file_type)))[vital_category %in% vital_cats]
 
 #RASS/GCS
 specific_assessment_categories <- c("rass", "gcs_total", "RASS")
-patient_assessments <- as.data.table(read_data(paste0(data_dir, "clif_patient_assessments", file_type), select = c("hospitalization_id", "recorded_dttm", "assessment_category", "numerical_value", "categorical_value")))[tolower(assessment_category) %in% specific_assessment_categories]
+patient_assessments <- as.data.table(read_data(paste0(ats_dir, "clif_patient_assessments", file_type), select = c("hospitalization_id", "recorded_dttm", "assessment_category", "numerical_value", "categorical_value")))[tolower(assessment_category) %in% specific_assessment_categories]
 patient_assessments <- unique(patient_assessments, by = c("hospitalization_id", "recorded_dttm", "assessment_category"))
 patient_assessments[, assessment_category := tolower(assessment_category)]
 
 #Elixhauser
-hospital_diagnosis <- as.data.table(read_data(paste0(data_dir,"clif_hospital_diagnosis", file_type), select = c("hospitalization_id", "diagnosis_code")))
+hospital_diagnosis <- as.data.table(read_data(paste0(ats_dir,"clif_hospital_diagnosis", file_type), select = c("hospitalization_id", "diagnosis_code")))
 setorder(hospital_diagnosis, hospitalization_id)
 
 #Labs
 specific_lab_categories <- c("creatinine", "bilirubin_total", "platelet_count", "po2_arterial", "pco2_arterial", "ph_arterial", "ph_venous", "pco2_venous", "anion_gap", "troponin_t", "troponin_i", "sodium", "bicarbonate", "chloride", "bun", "albumin", "glucose_serum", "hemoglobin", "hematocrit", "lactate", "so2_arterial", "wbc")
-labs_time_dependent <- as.data.table(read_data(paste0(data_dir,"clif_labs", file_type), select = c("hospitalization_id", "lab_order_dttm", "lab_collect_dttm", "lab_category", "lab_value_numeric", "lab_result_dttm")))[lab_category %in% specific_lab_categories]
+labs_time_dependent <- as.data.table(read_data(paste0(ats_dir,"clif_labs", file_type), select = c("hospitalization_id", "lab_order_dttm", "lab_collect_dttm", "lab_category", "lab_value_numeric", "lab_result_dttm")))[lab_category %in% specific_lab_categories]
 setorder(labs_time_dependent, hospitalization_id, lab_collect_dttm)
 setnames(labs_time_dependent, "lab_collect_dttm", "recorded_dttm")
 
 #Continuous Meds
 specific_med_groups <- c("vasoactives", "sedation", "paralytics", "analgesia", "paralytic")
-meds <- as.data.table(read_data(paste0(data_dir,"clif_medication_admin_continuous", file_type), select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category")))[med_group %in% specific_med_groups]
+meds <- as.data.table(read_data(paste0(ats_dir,"clif_medication_admin_continuous", file_type), select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category")))[med_group %in% specific_med_groups]
 setorder(meds, hospitalization_id, admin_dttm)
 
 #Intermittent Meds
 intermittent_med_groups <- c("paralytic", "paralytics", "sedation", "analgesia")
 intermittent_meds <- as.data.table(
   read_data(
-    paste0(data_dir, "clif_medication_admin_intermittent", file_type),
+    paste0(ats_dir, "clif_medication_admin_intermittent", file_type),
     select = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit", "med_category", "med_group", "med_route_category")
   )
 )[med_group %in% intermittent_med_groups]
@@ -617,77 +618,83 @@ respiratory_support_imv[, explicit_non_imv :=
 ]
 
 
-# Identify IMV Runs According to Rule - Two consecutive IMV values in device_category to start IMV time and two consecutive non-IMV values to end IMV time. If end IMV time is not IDed by algorithm then use recorded_dttm from last row (patient likely discharged - either transferred or deceased)
+# Identify IMV Runs
 imv_runs <- respiratory_support_imv[, {
   n <- .N
   run_list <- list()
-  i <- 1
+  
+  in_run <- FALSE
+  run_id_counter <- 0L
+  run_start <- as.POSIXct(NA)
+  last_imv_time <- as.POSIXct(NA)
+  imv_row_count <- 0L
+  consecutive_non_imv <- 0L  # tracks consecutive explicit non-IMV rows, NA rows don't reset this
+  
+  i <- 1L
   
   while (i <= n) {
-    current <- device_category[i]
     
-    # Look ahead for second IMV within next few rows (skipping NAs)
-    found_second_imv <- FALSE
-    for (k in (i + 1):n) {
-      if (!is.na(device_category[k]) && device_category[k] == "imv") {
-        found_second_imv <- TRUE
-        break
-      } else if (!is.na(device_category[k]) && device_category[k] != "imv") {
-        break  # Stop looking if we hit a non-NA, non-IMV
+    if (!in_run && isTRUE(imv_signal[i])) {
+      in_run <- TRUE
+      run_id_counter <- run_id_counter + 1L
+      run_start <- recorded_dttm[i]
+      last_imv_time <- recorded_dttm[i]
+      imv_row_count <- 1L
+      consecutive_non_imv <- 0L
+      i <- i + 1L
+      next
+    }
+    
+    if (in_run) {
+      
+      if (isTRUE(imv_signal[i])) {
+        last_imv_time <- recorded_dttm[i]
+        imv_row_count <- imv_row_count + 1L
+        consecutive_non_imv <- 0L  # reset counter when IMV signal seen again
+        
+      } else if (isTRUE(explicit_non_imv[i])) {
+        consecutive_non_imv <- consecutive_non_imv + 1L  # NA rows leave this unchanged
+      }
+      # NA device_category rows: neither branch fires, consecutive_non_imv unchanged
+      
+      # Stop rule 1: two or more consecutive explicit non-IMV rows (NA rows don't break the streak)
+      two_non_imv <- consecutive_non_imv >= 2L
+      
+      # Stop rule 2: long gap since last positive IMV evidence
+      long_gap <- !is.na(last_imv_time) &&
+        as.numeric(difftime(recorded_dttm[i], last_imv_time, units = "hours")) >= 24
+      
+      if (two_non_imv || long_gap) {
+        run_list[[length(run_list) + 1L]] <- data.table(
+          run_id     = run_id_counter,
+          begin_imv  = run_start,
+          end_imv    = last_imv_time,
+          n_imv_rows = imv_row_count
+        )
+        
+        in_run <- FALSE
+        run_start <- as.POSIXct(NA)
+        last_imv_time <- as.POSIXct(NA)
+        imv_row_count <- 0L
+        consecutive_non_imv <- 0L
       }
     }
     
-    if (!is.na(current) && current == "imv" && found_second_imv) {
-      begin_idx <- i
-      begin_imv <- recorded_dttm[begin_idx]
-      
-      # Search for end: 2 consecutive non-IMV/non-NA rows
-      end_idx <- NA
-      trach_flag <- FALSE
-      for (j in (begin_idx + 1):(n - 1)) {
-        dj1 <- device_category[j]
-        dj2 <- device_category[j + 1]
-        
-        cond1 <- !is.na(dj1) && dj1 != "imv"
-        cond2 <- !is.na(dj2) && dj2 != "imv"
-        
-        if (cond1 && cond2) {
-          end_idx <- j
-          if (dj1 == "Trach Collar" || dj2 == "trach collar") {
-            trach_flag <- TRUE
-          }
-          break
-        }
-      }
-      
-      # Use last timestamp if no end found
-      if (is.na(end_idx)) {
-        end_imv <- recorded_dttm[n]
-      } else {
-        end_imv <- recorded_dttm[end_idx]
-      }
-      
-      run_list[[length(run_list) + 1]] <- data.table(
-        hospitalization_id = hospitalization_id[1],
-        begin_imv = begin_imv,
-        end_imv = end_imv
-      )
-      
-      if (trach_flag) break
-      
-      i <- if (!is.na(end_idx)) end_idx + 1 else n + 1
-    } else {
-      i <- i + 1
-    }
+    i <- i + 1L
   }
   
-  rbindlist(run_list)
+  if (in_run) {
+    run_list[[length(run_list) + 1L]] <- data.table(
+      run_id     = run_id_counter,
+      begin_imv  = run_start,
+      end_imv    = last_imv_time,
+      n_imv_rows = imv_row_count
+    )
+  }
+  
+  if (length(run_list) > 0) rbindlist(run_list) else NULL
+  
 }, by = hospitalization_id]
-
-# Add run_id to filter for first period of IMV
-imv_runs[, `:=`(
-  run_id = seq_len(.N)
-), by = hospitalization_id]
 
 # Define the 28-day window cutoff per hospitalization
 # First IMV start = time zero for the 28-day clock
@@ -726,11 +733,11 @@ imv_runs[, next_begin_imv := NULL]
 imv_runs[, `:=`(
   imv_duration_hours = as.numeric(difftime(end_imv, begin_imv, units = "hours"))
 ), by = hospitalization_id]
-imv_runs <- imv_runs[, .(hospitalization_id, begin_imv, end_imv, time_to_next_imv_hours, imv_duration_hours, run_id)]
+imv_runs <- imv_runs[, .(hospitalization_id, begin_imv, end_imv, time_to_next_imv_hours, imv_duration_hours, run_id, n_imv_rows)]
 
 # Filter out non-real runs
-#imv_runs <- imv_runs[!is.na(imv_duration_hours) & imv_duration_hours > 0]
-#imv_runs <- imv_runs[n_imv_rows > 2]
+imv_runs <- imv_runs[!is.na(imv_duration_hours) & imv_duration_hours > 0]
+imv_runs <- imv_runs[n_imv_rows > 2]
 
 # Create reintubation flag: 1 if >1 run_id in a hospitalization, else 0
 imv_runs[, reintubation :=
@@ -1634,7 +1641,7 @@ language_counts_cohort <- patient_language[
   order(-N)
 ]
 
-#fwrite(language_counts_cohort[, .(language_category, N = N_display, percent = percent_display)], file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
+fwrite(language_counts_cohort[, .(language_category, N = N_display, percent = percent_display)], file.path(cohort_characteristics, paste0(institution, "_cohort_language_counts.csv")))
 
 #Merge Back
 demographics_final <- merge(hospitalization_table_part_five, patient_language, by = "patient_id", all = TRUE)
@@ -3193,7 +3200,7 @@ final_cohort_imv_runs_reduced <- final_cohort_imv_runs_merge[, .(
 #       file.path(cohort_characteristics, paste0(institution, "_laps2_missing_percentages.csv")))
 
 # Save Point
-write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_diag, "cleaned_cohort_w_laps_diag", institution, ".parquet"))
+write_parquet(final_cohort_imv_runs_reduced, paste0(intermediate_diag, "cleaned_cohort_w_laps_Oct", institution, ".parquet"))
 ```
 
 # PART FIVE: Calculate Med Doses, Paralytics, etc in First 48 hours of IMV
@@ -7132,7 +7139,7 @@ suppressWarnings(rm(vars_to_check, missing_from_data, vars_present,
                     missingness_summary, vars_with_missing))
 # ─────────────────────────────────────────────────────────────
 
-write_parquet(primary_analysis_analytic, paste0(intermediate_diag, "analytic_file_diag", institution, ".parquet"))
+write_parquet(primary_analysis_analytic, paste0(intermediate_diag, "analytic_file_Oct", institution, ".parquet"))
 ```
 
 
@@ -7623,4 +7630,531 @@ cat("\n========== DIAGNOSTIC SCORECARD ==========\n")
 print(scorecard)
 cat("==========================================\n\n")
 cat("All outputs written to:\n  ", diag_compare_dir, "\n")
+```
+
+# Diagnostic Comparison: Current Data vs October Source Data
+# Author: Alex Ortiz
+#
+# Purpose
+# -------
+# Disentangle whether the shift in RUSH's Spanish coefficient between
+# October 2025 and the current pipeline is driven by:
+#
+#   (a) Changes in the underlying CLIF data (new patients, refreshed
+#       vocabulary mappings, late-arriving documentation), or
+#   (b) Changes in the analysis pipeline code.
+#
+# Inputs
+# ------
+#   * intermediate_dir/analytic_file<institution>.parquet
+#       Current data, current pipeline.
+#
+#   * intermediate_diag_dir/analytic_file_Oct<institution>.parquet
+#       October-snapshot CLIF tables, current pipeline (built by the
+#       diagnostic script that points YAML's ats_dir at October data).
+#
+# Both files are produced by the SAME current cohort-build code. The only
+# thing that differs between them is the source CLIF tables.
+#
+# Logic
+# -----
+#   * If matched-spec analyses (no year, IMV >=24h) on the Oct-data file
+#     reproduce ~6 pp, the data is the answer.
+#   * If they still give ~3 pp, the code is the answer (despite both files
+#     being built with the current code, because the October analytic
+#     file from the original Fall 2025 run no longer exists for direct
+#     comparison -- so we infer from the magnitude of the shift).
+#   * If discharge_dttm < 2025-10-01 restriction on both files makes them
+#     converge AND match the October 6.04, the entire shift is from
+#     newly added patients in the current data.
+#
+# Outputs are <10-censored.
+
+# Setup ------------------------------------------------------------------------
+```{r setup-oct, message=FALSE, warning=FALSE}
+# Reuses helpers and paths defined earlier in xx_diagnostic_comparison.Rmd:
+#   diag_compare_dir, intermediate_dir, intermediate_diag_dir, institution
+#   build_primary_cohort(), censor_n(), fit_primary()
+# This block assumes those exist. If running standalone, source the earlier
+# blocks first.
+
+oct_path <- paste0(intermediate_diag_dir,
+                   "analytic_file_Oct", institution, ".parquet")
+
+if (!file.exists(oct_path)) {
+  stop("October-source analytic file not found at: ", oct_path,
+       "\nRun the October-data diagnostic build script first (the one that ",
+       "points YAML's ats_dir at the October CLIF tables).")
+}
+
+cohort_oct <- as.data.table(arrow::read_parquet(oct_path))
+cat("October-source analytic file: n =", nrow(cohort_oct), "\n")
+
+# cohort_new (current data + current code) was loaded in the earlier block
+if (!exists("cohort_new")) {
+  cohort_new <- as.data.table(arrow::read_parquet(
+    paste0(intermediate_dir, "analytic_file", institution, ".parquet")
+  ))
+}
+
+# Sanity check: same column structure?
+new_only_cols_oct <- setdiff(names(cohort_new), names(cohort_oct))
+oct_only_cols     <- setdiff(names(cohort_oct), names(cohort_new))
+if (length(new_only_cols_oct) > 0)
+  warning("Columns only in current file: ", paste(new_only_cols_oct, collapse = ", "))
+if (length(oct_only_cols) > 0)
+  warning("Columns only in Oct-source file: ", paste(oct_only_cols, collapse = ", "))
+```
+
+# Build primary cohorts (English/Spanish + Spanish-having ICUs) ----------------
+```{r build-cohorts-oct}
+primary_oct <- build_primary_cohort(cohort_oct)
+# primary_new already built in the earlier block
+
+cat("Primary cohort (current data + current code): n =", nrow(primary_new), "\n")
+cat("Primary cohort (Oct data + current code):     n =", nrow(primary_oct), "\n")
+
+# IMV >=24h subsets (matches Fall 2025 inclusion)
+primary_new_ge24 <- primary_new[imv_duration_hours_final >= 24]
+primary_oct_ge24 <- primary_oct[imv_duration_hours_final >= 24]
+
+cat("Primary cohort >=24h (current): n =", nrow(primary_new_ge24),
+    " | Spanish:", sum(primary_new_ge24$lang_cat_6 == "spanish"),
+    " | English:", sum(primary_new_ge24$lang_cat_6 == "english"), "\n")
+cat("Primary cohort >=24h (Oct):     n =", nrow(primary_oct_ge24),
+    " | Spanish:", sum(primary_oct_ge24$lang_cat_6 == "spanish"),
+    " | English:", sum(primary_oct_ge24$lang_cat_6 == "english"), "\n")
+```
+
+# Block 7: Cohort flux between data versions -----------------------------------
+# Without October's saved analytic file we cannot do hospitalization_id-level
+# matching to the original Fall 2025 cohort. We CAN compare the two analytic
+# files we have (Oct-source and current) using both hospitalization_id (which
+# should align if RUSH's chronological remap is stable) and a fallback triple
+# of (patient_id, admission_dttm, discharge_dttm).
+```{r block7-cohort-flux}
+# Determine which matching key to use
+has_patient_id <- "patient_id" %in% names(primary_new) &&
+                  "patient_id" %in% names(primary_oct)
+has_dttm_pair  <- all(c("admission_dttm", "discharge_dttm") %in% names(primary_new)) &&
+                  all(c("admission_dttm", "discharge_dttm") %in% names(primary_oct))
+
+# Try hospitalization_id matching first
+new_ids <- primary_new$hospitalization_id
+oct_ids <- primary_oct$hospitalization_id
+
+id_match_kept     <- length(intersect(new_ids, oct_ids))
+id_match_new_only <- length(setdiff(new_ids, oct_ids))
+id_match_oct_only <- length(setdiff(oct_ids, new_ids))
+
+cat("Hospitalization_id matching:\n")
+cat("  kept       =", id_match_kept, "\n")
+cat("  new_only   =", id_match_new_only, "\n")
+cat("  oct_only   =", id_match_oct_only, "\n")
+cat("  match rate (new in oct) =",
+    round(100 * id_match_kept / length(new_ids), 1), "%\n")
+
+# If hospitalization_id alignment is high, use it. If not, fall back to triple.
+match_rate <- id_match_kept / length(new_ids)
+use_triple_fallback <- match_rate < 0.80
+
+if (use_triple_fallback && has_patient_id && has_dttm_pair) {
+  cat("\nID match rate <80%; using (patient_id, admission_dttm, discharge_dttm) ",
+      "fallback for matching.\n", sep = "")
+
+  primary_new[, match_key := paste(patient_id,
+                                   format(admission_dttm, "%Y-%m-%d %H:%M:%S"),
+                                   format(discharge_dttm, "%Y-%m-%d %H:%M:%S"),
+                                   sep = "|")]
+  primary_oct[, match_key := paste(patient_id,
+                                   format(admission_dttm, "%Y-%m-%d %H:%M:%S"),
+                                   format(discharge_dttm, "%Y-%m-%d %H:%M:%S"),
+                                   sep = "|")]
+  match_method <- "triple"
+} else {
+  primary_new[, match_key := as.character(hospitalization_id)]
+  primary_oct[, match_key := as.character(hospitalization_id)]
+  match_method <- "hospitalization_id"
+}
+
+# Build the membership table using the chosen key
+new_keys <- primary_new$match_key
+oct_keys <- primary_oct$match_key
+
+flux <- data.table(
+  status = c("kept_both", "current_only", "oct_only"),
+  n = c(length(intersect(new_keys, oct_keys)),
+        length(setdiff(new_keys, oct_keys)),
+        length(setdiff(oct_keys, new_keys)))
+)
+flux <- censor_n(flux, "n")
+flux[, match_method := match_method]
+
+fwrite(flux,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block7_data_version_flux.csv")))
+
+# Same flux table stratified by language
+build_flux_by_lang <- function() {
+  new_only_keys <- setdiff(new_keys, oct_keys)
+  oct_only_keys <- setdiff(oct_keys, new_keys)
+  kept_keys     <- intersect(new_keys, oct_keys)
+
+  new_lang_lookup <- primary_new[, .(match_key, lang = as.character(lang_cat_6))]
+  oct_lang_lookup <- primary_oct[, .(match_key, lang = as.character(lang_cat_6))]
+
+  out <- data.table(
+    status = c(rep("kept_both", 2),
+               rep("current_only", 2),
+               rep("oct_only", 2)),
+    language = rep(c("english", "spanish"), 3)
+  )
+  out[status == "kept_both" & language == "english", n :=
+        sum(new_lang_lookup[match_key %in% kept_keys, lang == "english"])]
+  out[status == "kept_both" & language == "spanish", n :=
+        sum(new_lang_lookup[match_key %in% kept_keys, lang == "spanish"])]
+  out[status == "current_only" & language == "english", n :=
+        sum(new_lang_lookup[match_key %in% new_only_keys, lang == "english"])]
+  out[status == "current_only" & language == "spanish", n :=
+        sum(new_lang_lookup[match_key %in% new_only_keys, lang == "spanish"])]
+  out[status == "oct_only" & language == "english", n :=
+        sum(oct_lang_lookup[match_key %in% oct_only_keys, lang == "english"])]
+  out[status == "oct_only" & language == "spanish", n :=
+        sum(oct_lang_lookup[match_key %in% oct_only_keys, lang == "spanish"])]
+  out
+}
+flux_by_lang <- build_flux_by_lang()
+flux_by_lang <- censor_n(flux_by_lang, "n")
+flux_by_lang[, match_method := match_method]
+
+fwrite(flux_by_lang,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block7b_data_version_flux_by_lang.csv")))
+```
+
+# Block 8: 12-row coefficient table across data versions ----------------------
+# 8 cells from the existing Block 2 (current data + current detection +
+# 2 x duration x 2 year) -- though with current detection only, that's
+# actually 4 cells. Plus 4 new cells from Oct data + current code.
+```{r block8-coefficient-table}
+configs_oct <- list(
+  list(data = "current", filter = "all",  year = FALSE, df = primary_new),
+  list(data = "current", filter = "ge24", year = FALSE, df = primary_new_ge24),
+  list(data = "current", filter = "all",  year = TRUE,  df = primary_new),
+  list(data = "current", filter = "ge24", year = TRUE,  df = primary_new_ge24),
+  list(data = "oct",     filter = "all",  year = FALSE, df = primary_oct),
+  list(data = "oct",     filter = "ge24", year = FALSE, df = primary_oct_ge24),
+  list(data = "oct",     filter = "all",  year = TRUE,  df = primary_oct),
+  list(data = "oct",     filter = "ge24", year = TRUE,  df = primary_oct_ge24)
+)
+
+oct_decomp <- rbindlist(lapply(configs_oct, function(cfg) {
+  res <- fit_primary(cfg$df, include_year = cfg$year,
+                     label = sprintf("data=%s | filter=%s | year=%s",
+                                     cfg$data, cfg$filter, cfg$year))
+  if (is.null(res)) return(NULL)
+  res[, `:=`(data_version = cfg$data,
+             duration_filter = cfg$filter,
+             year_covariate = cfg$year)]
+  res
+}), fill = TRUE)
+
+setcolorder(oct_decomp, c("label", "data_version", "duration_filter",
+                          "year_covariate", "term", "estimate", "se",
+                          "p_value", "n_obs", "n_spanish", "n_english"))
+
+fwrite(oct_decomp,
+       file.path(diag_compare_dir,
+                 paste0(institution,
+                        "_diag_block8_data_version_decomposition.csv")))
+
+print(oct_decomp[, .(data_version, duration_filter, year_covariate,
+                     estimate = round(estimate, 3),
+                     se = round(se, 3),
+                     p = round(p_value, 4),
+                     n_obs)])
+```
+
+# Block 9: Cohort composition by IMV bin and language across data versions ----
+```{r block9-imv-distribution-data-version}
+make_imv_dist_lang <- function(dt, label) {
+  dt <- copy(dt)
+  dt[, imv_bin := cut(
+    imv_duration_hours_final,
+    breaks = c(0, 12, 24, 48, 72, Inf),
+    right  = FALSE,
+    include.lowest = TRUE
+  )]
+  out <- dt[, .(n = .N,
+                mean_pct_ds = mean(percent_deep_sedation_48, na.rm = TRUE),
+                median_pct_ds = median(percent_deep_sedation_48, na.rm = TRUE)),
+            by = .(imv_bin, lang_cat_6)]
+  out[, source := label]
+  setcolorder(out, "source")
+  out[order(imv_bin, lang_cat_6)]
+}
+
+dist_oct <- make_imv_dist_lang(primary_oct, "oct_data_current_code")
+dist_cur <- make_imv_dist_lang(primary_new, "current_data_current_code")
+
+dist_combined <- rbind(dist_oct, dist_cur, fill = TRUE)
+dist_combined[, n_censored := fifelse(n < 10, "<10", as.character(n))]
+dist_combined[n < 10, `:=`(n = NA_integer_,
+                           mean_pct_ds = NA_real_,
+                           median_pct_ds = NA_real_)]
+
+fwrite(dist_combined,
+       file.path(diag_compare_dir,
+                 paste0(institution,
+                        "_diag_block9_imv_distribution_by_data_version.csv")))
+```
+
+# Block 10: Per-patient drift on matched encounters ---------------------------
+# For (match_key) values present in both files, compare imv_duration_hours_final
+# and percent_deep_sedation_48. Stratify by language. If matched encounters have
+# stable values across data versions, the only thing changing is which patients
+# are in the cohort. If matched encounters drift in their per-patient values,
+# then the source CLIF data has been altered for previously-existing records.
+```{r block10-per-patient-drift}
+# Slim each cohort to relevant fields and join on match_key
+oct_slim <- primary_oct[, .(match_key,
+                            lang_oct = as.character(lang_cat_6),
+                            imv_dur_oct = imv_duration_hours_final,
+                            pct_ds_oct = percent_deep_sedation_48,
+                            begin_imv_oct = begin_imv,
+                            end_imv_oct = end_imv)]
+new_slim <- primary_new[, .(match_key,
+                            lang_new = as.character(lang_cat_6),
+                            imv_dur_new = imv_duration_hours_final,
+                            pct_ds_new = percent_deep_sedation_48,
+                            begin_imv_new = begin_imv,
+                            end_imv_new = end_imv)]
+
+drift <- merge(oct_slim, new_slim, by = "match_key")
+cat("Matched encounters (kept in both files): n =", nrow(drift), "\n")
+
+if (nrow(drift) > 0) {
+  drift[, lang_for_strat := fcoalesce(lang_new, lang_oct)]
+  drift[, imv_dur_diff := imv_dur_new - imv_dur_oct]
+  drift[, pct_ds_diff  := pct_ds_new  - pct_ds_oct]
+  drift[, begin_imv_diff_h := as.numeric(difftime(begin_imv_new, begin_imv_oct,
+                                                  units = "hours"))]
+
+  # Also flag: did this encounter cross the 24h IMV duration threshold between
+  # versions? (i.e., was below in one version, above in the other)
+  drift[, ge24_oct := imv_dur_oct >= 24]
+  drift[, ge24_new := imv_dur_new >= 24]
+  drift[, ge24_status := fcase(
+    ge24_oct &  ge24_new, "both",
+    ge24_oct & !ge24_new, "oct_only",
+    !ge24_oct &  ge24_new, "new_only",
+    default = "neither"
+  )]
+
+  drift_overall <- data.table(
+    group = "overall",
+    n = nrow(drift),
+    median_imv_diff_h = median(drift$imv_dur_diff, na.rm = TRUE),
+    q25_imv_diff_h    = quantile(drift$imv_dur_diff, 0.25, na.rm = TRUE),
+    q75_imv_diff_h    = quantile(drift$imv_dur_diff, 0.75, na.rm = TRUE),
+    pct_imv_diff_gt_1h = 100 * mean(abs(drift$imv_dur_diff) > 1, na.rm = TRUE),
+    median_pct_ds_diff = median(drift$pct_ds_diff, na.rm = TRUE),
+    q25_pct_ds_diff    = quantile(drift$pct_ds_diff, 0.25, na.rm = TRUE),
+    q75_pct_ds_diff    = quantile(drift$pct_ds_diff, 0.75, na.rm = TRUE),
+    pct_ds_diff_gt_5pp = 100 * mean(abs(drift$pct_ds_diff) > 5, na.rm = TRUE),
+    median_begin_imv_diff_h = median(drift$begin_imv_diff_h, na.rm = TRUE)
+  )
+
+  drift_lang <- drift[!is.na(lang_for_strat),
+    .(n = .N,
+      median_imv_diff_h = median(imv_dur_diff, na.rm = TRUE),
+      q25_imv_diff_h    = quantile(imv_dur_diff, 0.25, na.rm = TRUE),
+      q75_imv_diff_h    = quantile(imv_dur_diff, 0.75, na.rm = TRUE),
+      pct_imv_diff_gt_1h = 100 * mean(abs(imv_dur_diff) > 1, na.rm = TRUE),
+      median_pct_ds_diff = median(pct_ds_diff, na.rm = TRUE),
+      q25_pct_ds_diff    = quantile(pct_ds_diff, 0.25, na.rm = TRUE),
+      q75_pct_ds_diff    = quantile(pct_ds_diff, 0.75, na.rm = TRUE),
+      pct_ds_diff_gt_5pp = 100 * mean(abs(pct_ds_diff) > 5, na.rm = TRUE),
+      median_begin_imv_diff_h = median(begin_imv_diff_h, na.rm = TRUE)),
+    by = .(group = lang_for_strat)
+  ]
+
+  drift_summary <- rbind(drift_overall, drift_lang, fill = TRUE)
+  drift_summary[, n_censored := fifelse(n < 10, "<10", as.character(n))]
+  drift_summary[n < 10, `:=`(n = NA_integer_,
+                             median_imv_diff_h = NA_real_,
+                             q25_imv_diff_h = NA_real_, q75_imv_diff_h = NA_real_,
+                             pct_imv_diff_gt_1h = NA_real_,
+                             median_pct_ds_diff = NA_real_,
+                             q25_pct_ds_diff = NA_real_, q75_pct_ds_diff = NA_real_,
+                             pct_ds_diff_gt_5pp = NA_real_,
+                             median_begin_imv_diff_h = NA_real_)]
+
+  fwrite(drift_summary,
+         file.path(diag_compare_dir,
+                   paste0(institution,
+                          "_diag_block10_per_patient_drift.csv")))
+
+  # Cross-tab of 24h-threshold-crossing patients by language
+  ge24_cross <- drift[, .N, by = .(ge24_status, lang_for_strat)]
+  ge24_cross[, n_censored := fifelse(N < 10, "<10", as.character(N))]
+  ge24_cross[N < 10, N := NA_integer_]
+  fwrite(ge24_cross,
+         file.path(diag_compare_dir,
+                   paste0(institution,
+                          "_diag_block10b_ge24_threshold_crossings.csv")))
+}
+```
+
+# Block 11: Discharge-cutoff comparison (the new request) ---------------------
+# Restrict both files to encounters with discharge_dttm < 2025-10-01.
+# This isolates "what about retained-period patients changed" from
+# "what about new patients added since October."
+#
+# If the cutoff-restricted current cohort matches the cutoff-restricted Oct
+# cohort, the entire shift is from new patients added since October.
+# If they still diverge, then retained-period patients changed too -- meaning
+# the source CLIF was refreshed for previously-existing records.
+```{r block11-discharge-cutoff}
+cutoff_date <- as.POSIXct("2025-10-01 00:00:00", tz = "UTC")
+
+# QC: how many encounters with admission_dttm < cutoff have discharge_dttm
+# >= cutoff? These are encounters that started before the cutoff but extended
+# past it; they'd be excluded by the discharge-based cutoff even though they
+# were "October-era" admissions.
+qc_admission_pre_discharge_post <- function(dt, label) {
+  if (!"admission_dttm" %in% names(dt) || !"discharge_dttm" %in% names(dt)) {
+    return(NULL)
+  }
+  pre_admit <- dt[admission_dttm < cutoff_date]
+  data.table(
+    source = label,
+    n_admission_pre_cutoff = nrow(pre_admit),
+    n_admission_pre_discharge_post = sum(pre_admit$discharge_dttm >= cutoff_date,
+                                         na.rm = TRUE),
+    pct_extending_past_cutoff = round(
+      100 * mean(pre_admit$discharge_dttm >= cutoff_date, na.rm = TRUE), 2
+    )
+  )
+}
+
+qc_cutoff <- rbind(
+  qc_admission_pre_discharge_post(primary_new, "current_data"),
+  qc_admission_pre_discharge_post(primary_oct, "oct_data"),
+  fill = TRUE
+)
+fwrite(qc_cutoff,
+       file.path(diag_compare_dir,
+                 paste0(institution,
+                        "_diag_block11_qc_discharge_cutoff_extension.csv")))
+
+# Apply the cutoff if discharge_dttm exists
+if ("discharge_dttm" %in% names(primary_new) &&
+    "discharge_dttm" %in% names(primary_oct)) {
+
+  primary_new_pre10  <- primary_new[discharge_dttm < cutoff_date]
+  primary_oct_pre10  <- primary_oct[discharge_dttm < cutoff_date]
+  primary_new_pre10_ge24 <- primary_new_pre10[imv_duration_hours_final >= 24]
+  primary_oct_pre10_ge24 <- primary_oct_pre10[imv_duration_hours_final >= 24]
+
+  cat("\nDischarge < 2025-10-01 cohorts:\n")
+  cat("  Current data, all durations: n =", nrow(primary_new_pre10),
+      " | Spanish:", sum(primary_new_pre10$lang_cat_6 == "spanish"), "\n")
+  cat("  Oct data, all durations:     n =", nrow(primary_oct_pre10),
+      " | Spanish:", sum(primary_oct_pre10$lang_cat_6 == "spanish"), "\n")
+  cat("  Current data, IMV >=24h: n =", nrow(primary_new_pre10_ge24),
+      " | Spanish:", sum(primary_new_pre10_ge24$lang_cat_6 == "spanish"), "\n")
+  cat("  Oct data, IMV >=24h:     n =", nrow(primary_oct_pre10_ge24),
+      " | Spanish:", sum(primary_oct_pre10_ge24$lang_cat_6 == "spanish"), "\n")
+
+  # Same 8-cell decomposition but on discharge-cutoff cohorts
+  configs_pre10 <- list(
+    list(data = "current_pre10", filter = "all",  year = FALSE, df = primary_new_pre10),
+    list(data = "current_pre10", filter = "ge24", year = FALSE, df = primary_new_pre10_ge24),
+    list(data = "current_pre10", filter = "all",  year = TRUE,  df = primary_new_pre10),
+    list(data = "current_pre10", filter = "ge24", year = TRUE,  df = primary_new_pre10_ge24),
+    list(data = "oct_pre10",     filter = "all",  year = FALSE, df = primary_oct_pre10),
+    list(data = "oct_pre10",     filter = "ge24", year = FALSE, df = primary_oct_pre10_ge24),
+    list(data = "oct_pre10",     filter = "all",  year = TRUE,  df = primary_oct_pre10),
+    list(data = "oct_pre10",     filter = "ge24", year = TRUE,  df = primary_oct_pre10_ge24)
+  )
+
+  pre10_decomp <- rbindlist(lapply(configs_pre10, function(cfg) {
+    res <- fit_primary(cfg$df, include_year = cfg$year,
+                       label = sprintf("data=%s | filter=%s | year=%s",
+                                       cfg$data, cfg$filter, cfg$year))
+    if (is.null(res)) return(NULL)
+    res[, `:=`(data_version = cfg$data,
+               duration_filter = cfg$filter,
+               year_covariate = cfg$year)]
+    res
+  }), fill = TRUE)
+
+  setcolorder(pre10_decomp, c("label", "data_version", "duration_filter",
+                              "year_covariate", "term", "estimate", "se",
+                              "p_value", "n_obs", "n_spanish", "n_english"))
+
+  fwrite(pre10_decomp,
+         file.path(diag_compare_dir,
+                   paste0(institution,
+                          "_diag_block11_discharge_cutoff_decomposition.csv")))
+
+  print(pre10_decomp[, .(data_version, duration_filter, year_covariate,
+                         estimate = round(estimate, 3),
+                         se = round(se, 3),
+                         p = round(p_value, 4),
+                         n_obs)])
+} else {
+  warning("discharge_dttm not present in one or both files; skipping Block 11.")
+}
+```
+
+# Block 12: Updated scorecard --------------------------------------------------
+# Pull all Spanish coefficients across data versions and discharge-cutoff cells
+# into one CSV. This is the consortium-friendly summary file.
+```{r block12-scorecard-update}
+# Combine the data-version decomposition (Block 8) with the discharge-cutoff
+# decomposition (Block 11). The earlier xx_diagnostic_comparison.Rmd's
+# block6 scorecard covers detection-method comparisons separately.
+oct_scorecard <- rbindlist(list(
+  oct_decomp[grepl("spanish", term)][, source := "block8_data_version"],
+  if (exists("pre10_decomp"))
+    pre10_decomp[grepl("spanish", term)][, source := "block11_discharge_cutoff"]
+  else NULL
+), fill = TRUE)
+
+oct_scorecard <- oct_scorecard[, .(source, label, term,
+                                   estimate = round(estimate, 3),
+                                   se = round(se, 3),
+                                   p_value = round(p_value, 4),
+                                   n_obs, n_spanish, n_english,
+                                   data_version, duration_filter,
+                                   year_covariate)]
+
+fwrite(oct_scorecard,
+       file.path(diag_compare_dir,
+                 paste0(institution, "_diag_block12_scorecard_data_version.csv")))
+
+cat("\n========== DATA VERSION DIAGNOSTIC SCORECARD ==========\n")
+print(oct_scorecard)
+cat("=======================================================\n\n")
+
+# Targeted summary line for the headline question
+target <- oct_scorecard[
+  source == "block8_data_version" &
+  data_version == "oct" &
+  duration_filter == "ge24" &
+  year_covariate == FALSE
+]
+if (nrow(target) > 0) {
+  cat("HEADLINE: Oct-data + current-code + IMV>=24h + no_year:\n")
+  cat("  Spanish coefficient =", target$estimate, "pp",
+      "| SE =", target$se,
+      "| p =", target$p_value, "\n")
+  cat("  Compare to October Fall 2025 reported value: 6.04 pp\n")
+  cat("  If close to 6, data refresh accounts for the shift.\n")
+  cat("  If close to 3, code accounts for the shift.\n\n")
+}
+
+cat("All Block 7-12 outputs written to:\n  ", diag_compare_dir, "\n")
 ```
