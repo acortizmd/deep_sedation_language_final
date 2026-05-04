@@ -7678,7 +7678,7 @@ cat("All outputs written to:\n  ", diag_compare_dir, "\n")
 # This block assumes those exist. If running standalone, source the earlier
 # blocks first.
 
-oct_path <- paste0(intermediate_diag_dir,
+oct_path <- paste0(intermediate_diag,
                    "analytic_file_Oct", institution, ".parquet")
 
 if (!file.exists(oct_path)) {
