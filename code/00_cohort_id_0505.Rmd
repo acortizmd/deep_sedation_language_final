@@ -3670,8 +3670,30 @@ propofol_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      # Filter for improbably high values
+      # Plausibility filters before conversion
+      DTprop[med_dose_unit == "mg/hr"    & med_dose > 3000, med_dose := NA_real_]
+      DTprop[med_dose_unit == "mg/kg/hr" & med_dose > 50,   med_dose := NA_real_]
       DTprop[med_dose_unit == "mcg/kg/min" & med_dose > 200, med_dose := NA_real_]
+      
+      # Convert mg/hr -> mcg/kg/min
+      DTprop[
+        med_dose_unit == "mg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose * 1000) / (weight_kg * 60),
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
+      DTprop <- DTprop[
+        !(med_dose_unit == "mg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
+      # Convert mg/kg/hr -> mcg/kg/min
+      DTprop[
+        med_dose_unit == "mg/kg/hr",
+        `:=`(
+          med_dose      = (med_dose * 1000) / 60,
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
 
       #########################################
       # Split infusion vs push
@@ -4954,6 +4976,9 @@ remifentanil_total_48h <- safe_med_eval({
         end_48h
       )]
       
+      # Plausibility filter
+      DTremi[med_dose_unit == "mcg/kg/min" & med_dose > 2, med_dose := NA_real_]
+      
       # ---------------------------
       # Split infusion vs bolus
       # ---------------------------
@@ -5108,6 +5133,259 @@ empty_cols = c(
   "remifentanil_avg_mcgkgmin_48"
 ),
 med_name = "remifentanil")
+
+###############################################################################
+# Sufentanil
+###############################################################################
+cont_sufentanil_receipt <- empty_med_table(c("hospitalization_id", "cont_sufentanil_receipt"))
+sufentanil_total_48h <- safe_med_eval({
+  
+  sufentanil <- meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "sufentanil"
+  ]
+  
+  sufentanil_int <- intermittent_meds[
+    hospitalization_id %in% final_cohort_imv_runs$hospitalization_id &
+      med_category == "sufentanil"
+  ]
+  
+  # If no sufentanil exists in either source, return empty shells
+  if (nrow(sufentanil) == 0 && nrow(sufentanil_int) == 0) {
+    
+    cont_sufentanil_receipt <<- empty_med_table(c(
+      "hospitalization_id",
+      "cont_sufentanil_receipt"
+    ))
+    
+    empty_med_table(c(
+      "hospitalization_id",
+      "sufentanil_total_mcg_48",
+      "sufentanil_total_mme_48",
+      "sufentanil_avg_mcghr_48"
+    ))
+    
+  } else {
+    
+    sufentanil_combined <- merge(
+      sufentanil,
+      sufentanil_int,
+      by = c(
+        "hospitalization_id",
+        "admin_dttm",
+        "med_dose",
+        "med_dose_unit",
+        "med_category",
+        "med_group",
+        "med_route_category"
+      ),
+      all = TRUE
+    )
+    
+    sufentanil_expanded <- merge(
+      unique(
+        final_cohort_imv_runs[, .(hospitalization_id, begin_imv, end_imv,
+                                   weight_kg, imv_duration_hours_final)]),
+      sufentanil_combined,
+      by = "hospitalization_id",
+      all.x = FALSE, all.y = FALSE
+    )
+    
+    sufentanil_expanded <- sufentanil_expanded[!is.na(med_dose)]
+    
+    # If merge/filter leaves no usable rows, return empty shells
+    if (nrow(sufentanil_expanded) == 0) {
+      
+      cont_sufentanil_receipt <<- empty_med_table(c(
+        "hospitalization_id",
+        "cont_sufentanil_receipt"
+      ))
+      
+      empty_med_table(c(
+        "hospitalization_id",
+        "sufentanil_total_mcg_48",
+        "sufentanil_total_mme_48",
+        "sufentanil_avg_mcghr_48"
+      ))
+      
+    } else {
+      
+      DTsuf <- copy(sufentanil_expanded)
+      
+      DTsuf[, begin_imv  := as.POSIXct(begin_imv)]
+      DTsuf[, end_imv    := as.POSIXct(end_imv)]
+      DTsuf[, admin_dttm := as.POSIXct(admin_dttm)]
+      
+      DTsuf[, med_dose_unit := trimws(tolower(med_dose_unit))]
+      
+      DTsuf[, `:=`(
+        start_grace = begin_imv - 60 * 60,
+        end_48h     = begin_imv + 48 * 60 * 60
+      )]
+      
+      DTsuf[, window_end := fifelse(
+        !is.na(end_imv) & end_imv < end_48h,
+        end_imv,
+        end_48h
+      )]
+      
+      # Plausibility filters BEFORE unit conversion
+      # Clinical max ~0.5 mcg/kg/hr (rare); 5 is very generous
+      DTsuf[med_dose_unit == "mcg/kg/hr"  & med_dose > 5,    med_dose := NA_real_]
+      # mcg/kg/min max ~0.008; 0.1 is generous
+      DTsuf[med_dose_unit == "mcg/kg/min" & med_dose > 0.1,  med_dose := NA_real_]
+      # mcg bolus max ~200 mcg is a generous ceiling
+      DTsuf[med_dose_unit == "mcg"        & med_dose > 200,  med_dose := NA_real_]
+      
+      # Convert mcg/kg/min -> mcg/kg/hr so all infusion rates share one unit
+      DTsuf[
+        med_dose_unit == "mcg/kg/min",
+        `:=`(
+          med_dose      = med_dose * 60,
+          med_dose_unit = "mcg/kg/hr"
+        )
+      ]
+      
+      # ---------------------------
+      # Split infusion vs bolus
+      # ---------------------------
+      inf <- DTsuf[med_dose_unit == "mcg/kg/hr"]
+      setorder(inf, hospitalization_id, admin_dttm)
+      
+      bolus <- DTsuf[med_dose_unit == "mcg"]
+      bolus <- unique(bolus, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit"))
+      
+      # ---------------------------
+      # BOLUS: mcg doses within window
+      # ---------------------------
+      bolus_48 <- bolus[
+        admin_dttm >= begin_imv &
+          admin_dttm <= window_end &
+          !is.na(med_dose),
+        .(bolus_mcg_48h = sum(med_dose, na.rm = TRUE)),
+        by = hospitalization_id
+      ]
+      
+      # ---------------------------
+      # INFUSION timeline
+      # ---------------------------
+      baseline_rows <- inf[
+        admin_dttm >= start_grace & admin_dttm < begin_imv,
+        .SD[.N],
+        by = hospitalization_id
+      ][, admin_dttm := begin_imv]
+      
+      inf_0_win <- inf[
+        admin_dttm >= begin_imv & admin_dttm <= window_end
+      ]
+      
+      inf2 <- rbindlist(
+        list(inf_0_win, baseline_rows),
+        use.names = TRUE,
+        fill = TRUE
+      )
+      
+      setorder(inf2, hospitalization_id, admin_dttm)
+      inf2 <- inf2[, .SD[.N], by = .(hospitalization_id, admin_dttm)]
+      
+      inf2[, next_admin_dttm := shift(admin_dttm, type = "lead"), by = hospitalization_id]
+      inf2[, interval_end := fifelse(
+        is.na(next_admin_dttm),
+        window_end,
+        pmin(next_admin_dttm, window_end)
+      )]
+      inf2[, duration_min := as.numeric(difftime(interval_end, admin_dttm, units = "mins"))]
+      inf2[duration_min < 0, duration_min := 0]
+      
+      # mcg/kg/hr * kg / 60 = mcg/min; integrate to mcg
+      inf2[, suf_rate_mcg_min := (med_dose * weight_kg) / 60]
+      inf2[, infusion_mcg := suf_rate_mcg_min * duration_min]
+      
+      inf_48 <- inf2[
+        duration_min > 0 & !is.na(suf_rate_mcg_min),
+        .(
+          infusion_mcg_48h     = sum(infusion_mcg, na.rm = TRUE),
+          infusion_minutes_48h = sum(duration_min, na.rm = TRUE)
+        ),
+        by = hospitalization_id
+      ]
+      
+      inf_48[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      inf_48[infusion_minutes_48h < 60, infusion_mcg_48h := 0]
+      
+      # Receipt of continuous sufentanil
+      cont_sufentanil_receipt <<- unique(
+        inf_48[infusion_mcg_48h > 0, .(hospitalization_id)]
+      )
+      cont_sufentanil_receipt[, cont_sufentanil_receipt := 1L]
+      
+      if (nrow(cont_sufentanil_receipt) == 0) {
+        cont_sufentanil_receipt <<- empty_med_table(c(
+          "hospitalization_id",
+          "cont_sufentanil_receipt"
+        ))
+      }
+      
+      # ---------------------------
+      # Combine infusion + bolus
+      # ---------------------------
+      sufentanil_total_48h <- merge(
+        inf_48,
+        bolus_48,
+        by = "hospitalization_id",
+        all = TRUE
+      )
+      
+      sufentanil_total_48h[is.na(infusion_mcg_48h), infusion_mcg_48h := 0]
+      sufentanil_total_48h[is.na(bolus_mcg_48h),   bolus_mcg_48h   := 0]
+      sufentanil_total_48h[is.na(infusion_minutes_48h), infusion_minutes_48h := 0]
+      
+      sufentanil_total_48h[, sufentanil_total_mcg_48 := infusion_mcg_48h + bolus_mcg_48h]
+      sufentanil_total_48h <- sufentanil_total_48h[, .(
+        hospitalization_id,
+        sufentanil_total_mcg_48
+      )]
+      
+      # MME conversion: sufentanil is ~10x more potent than fentanyl
+      # 1 mcg sufentanil ≈ 10 mcg fentanyl ≈ 1 MME
+      sufentanil_total_48h[, sufentanil_total_mme_48 := sufentanil_total_mcg_48 * 1.0]
+      
+      # Merge in duration
+      sufentanil_total_48h <- merge(
+        sufentanil_total_48h,
+        final_cohort_imv_runs[, .(hospitalization_id, imv_duration_hours_final)],
+        by = "hospitalization_id",
+        all.x = TRUE
+      )
+      
+      sufentanil_total_48h[, imv_hours_capped := fcase(
+        is.na(imv_duration_hours_final), NA_real_,
+        imv_duration_hours_final > 48,  48,
+        default = imv_duration_hours_final
+      )]
+      
+      # Average mcg/hr
+      sufentanil_total_48h[, sufentanil_avg_mcghr_48 := sufentanil_total_mcg_48 / imv_hours_capped]
+      sufentanil_total_48h[imv_hours_capped <= 0, sufentanil_avg_mcghr_48 := NA_real_]
+      
+      sufentanil_total_48h[, .(
+        hospitalization_id,
+        sufentanil_total_mcg_48,
+        sufentanil_total_mme_48,
+        sufentanil_avg_mcghr_48
+      )]
+    }
+  }
+  
+},
+empty_cols = c(
+  "hospitalization_id",
+  "sufentanil_total_mcg_48",
+  "sufentanil_total_mme_48",
+  "sufentanil_avg_mcghr_48"
+),
+med_name = "sufentanil")
+
 ################################################################################
 # Midazolam
 ################################################################################
@@ -6501,6 +6779,18 @@ paralytics_final <- safe_med_eval({
         end_48h
       )]
       
+      # Convert mg/hr -> mcg/kg/min
+      DTparalytics[
+        med_dose_unit == "mg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose / weight_kg / 60) * 1000,
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
+      DTparalytics <- DTparalytics[
+        !(med_dose_unit == "mg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
+      
       # Filter out implausibly high doses
       DTparalytics[med_dose_unit == "mcg/kg/min" & med_dose > 30, med_dose := NA_real_]
       
@@ -6769,6 +7059,8 @@ tables_merge_meds <- list(
   cont_morphine_receipt,
   remifentanil_total_48h,
   cont_remi_receipt,
+  sufentanil_total_48h,
+  cont_sufentanil_receipt,
   midazolam_total_48h,
   cont_midaz_receipt,
   lorazepam_total_48h,
@@ -6804,7 +7096,8 @@ summary_meds_data[, cont_opioids_receipt := as.integer(
   fcoalesce(cont_fent_receipt, 0L) == 1 |
   fcoalesce(cont_hydro_receipt, 0L) == 1 |
   fcoalesce(cont_morphine_receipt, 0L) == 1 |
-  fcoalesce(cont_remi_receipt, 0L) == 1
+  fcoalesce(cont_remi_receipt, 0L) == 1 |
+  fcoalesce(cont_sufentanil_receipt, 0L) == 1
 )]
 
 # Any continuous benzo receipt
@@ -6835,7 +7128,8 @@ summary_meds_data[, total_mme :=
   fcoalesce(fentanyl_total_mme_48, 0) +
   fcoalesce(hydromorphone_total_mme_48, 0) +
   fcoalesce(morphine_total_mme_48, 0) +
-  fcoalesce(remifentanil_total_mme_48, 0)
+  fcoalesce(remifentanil_total_mme_48, 0) +
+  fcoalesce(sufentanil_total_mme_48,  0)
 ]
 
 # Analgesia Only
