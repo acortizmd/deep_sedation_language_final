@@ -3411,7 +3411,7 @@ ethnicity_specs <- list(
 
 for (spec in ethnicity_specs) {
   make_table1_pair(
-    dt = spec$data, by = "ethnicity_category", reference_level = "non-hispanic",
+    dt = spec$data, by = "ethnicity_category_final", reference_level = "non-hispanic/unknown",
     cat_vars = cat_vars_explore_ethn, cont_vars = cont_vars_explore,
     site_name = institution,
     tables_dir = paralytics_exploratory_tables, institution_prefix = institution,
@@ -3423,7 +3423,7 @@ for (spec in ethnicity_specs) {
   # For ethnicity model, ethnicity is the exposure — drop it from covariates
   fit <- fit_model_safe(
     outcome     = "continuous_nmba_48",
-    exposure    = "ethnicity_category",
+    exposure    = "ethnicity_category_final",
     covariates  = exploratory_covariates_paralytic,
     data        = spec$data,
     model_name  = spec$model_name,
@@ -3441,13 +3441,13 @@ for (spec in ethnicity_specs) {
 ################################################################################
 # Racial Disparities — All IMV / ARF / Non-ARF
 ################################################################################
-cat_vars_explore_race <- c("sex_category", "ethnicity_category", "lang_cat_1",
+cat_vars_explore_race <- c("sex_category", "ethnicity_category_final", "lang_cat_1",
                            "hospital_id", "icu_imv", "location_of_intubation",
                            "admission_type_category", "arf_flag", "aHrf_flag")
 
 # Race covariates: race is exposure, so use ethnicity_category in covariates instead
 race_covariates_paralytic <- c(
-  "ethnicity_category", "lang_cat_1", "age_category", "bmi", "sex_category",
+  "ethnicity_category_final", "lang_cat_1", "age_category", "bmi", "sex_category",
   "factor(hospital_icu_id)", "elixhauser_score", "laps2",
   "factor(observation_year)"
 )
@@ -3489,13 +3489,13 @@ for (spec in race_specs) {
 ################################################################################
 # Sex Disparities — All IMV / ARF / Non-ARF
 ################################################################################
-cat_vars_explore_sex <- c("ethnicity_category", "race_category", "lang_cat_1",
+cat_vars_explore_sex <- c("ethnicity_category_final", "race_category", "lang_cat_1",
                           "hospital_id", "icu_imv", "location_of_intubation",
                           "admission_type_category", "arf_flag", "aHrf_flag")
 
 # Sex covariates: sex is exposure, race + ethnicity stay as covariates
 sex_covariates_paralytic <- c(
-  "race_category", "ethnicity_category", "lang_cat_1", "age_category", "bmi",
+  "race_category", "ethnicity_category_final", "lang_cat_1", "age_category", "bmi",
   "factor(hospital_icu_id)", "elixhauser_score", "laps2",
   "factor(observation_year)"
 )

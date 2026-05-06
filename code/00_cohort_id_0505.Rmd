@@ -3631,13 +3631,6 @@ propofol_total_48h <- safe_med_eval({
       all.x = FALSE, all.y = FALSE
       )
     
-#    propofol_expanded <- merge(
-#      propofol_combined,
-#      final_cohort_imv_runs,
-#      by = "hospitalization_id",
-#      all = TRUE
-#    )
-    
     propofol_expanded <- propofol_expanded[!is.na(med_dose)]
     
     # If merge/filter leaves no usable rows, return empty shells
@@ -3677,7 +3670,7 @@ propofol_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      #Filter for improbably high values
+      # Filter for improbably high values
       DTprop[med_dose_unit == "mcg/kg/min" & med_dose > 200, med_dose := NA_real_]
 
       #########################################
@@ -3691,7 +3684,7 @@ propofol_total_48h <- safe_med_eval({
         med_dose / 1000,
         med_dose
       )]
-      #Filter for improbably high values
+      # Filter for improbably high values on harmonized mg scale
       push[push_dose_mg > 2000, push_dose_mg := NA_real_]  
       push <- push[!is.na(push_dose_mg)]                     
       push <- unique(push, by = c("hospitalization_id", "admin_dttm", "med_dose", "med_dose_unit"))
@@ -3871,13 +3864,6 @@ precedex_total_48h <- safe_med_eval({
       all.x = FALSE, all.y = FALSE   # inner join
       )
     
-#    precedex_expanded <- merge(
-#      precedex,
-#      final_cohort_imv_runs,
-#      by = "hospitalization_id",
-#      all.x = TRUE
-#    )
-    
     precedex_expanded <- precedex_expanded[!is.na(med_dose)]
     precedex_expanded[med_dose_unit == "mcg/kg", med_dose_unit := "mcg/kg/hr"]
     
@@ -3918,9 +3904,10 @@ precedex_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      DTdex[med_dose_unit == "mcg/kg/hr" & med_dose > 5, med_dose := NA_real_]
+      # Plausibility filters
+      DTdex[med_dose_unit == "mcg/kg/hr" & med_dose > 5,   med_dose := NA_real_]
       DTdex[med_dose_unit == "mcg/kg/min" & med_dose > 0.1, med_dose := NA_real_]
-      DTdex[med_dose_unit == "mcg" & med_dose > 500, med_dose := NA_real_]
+      DTdex[med_dose_unit == "mcg" & med_dose > 500,        med_dose := NA_real_]
       
       # ---------------------------
       # Split infusion vs push
@@ -4150,7 +4137,7 @@ fentanyl_total_48h <- safe_med_eval({
     )
   ]
 
-# Drop rows that still cannot be interpreted safely
+  # Drop rows that still cannot be interpreted safely
   fentanyl_expanded <- fentanyl_expanded[
     !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
     ]
@@ -4436,9 +4423,23 @@ hydromorphone_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      #Filter out implausibly high doses
-      DThydro[med_dose_unit == "mg/hr" & med_dose > 20, med_dose := NA_real_]
-      DThydro[med_dose_unit == "mg" & med_dose > 20, med_dose := NA_real_]
+      # Plausibility filters BEFORE unit conversion
+      DThydro[med_dose_unit == "mg/hr"     & med_dose > 20,  med_dose := NA_real_]
+      DThydro[med_dose_unit == "mg"        & med_dose > 20,  med_dose := NA_real_]
+      DThydro[med_dose_unit == "mcg/kg/hr" & med_dose > 100, med_dose := NA_real_]
+      
+      # Convert mcg/kg/hr -> mg/hr
+      DThydro[
+        med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose     = (med_dose * weight_kg) / 1000,
+          med_dose_unit = "mg/hr"
+        )
+      ]
+      # Drop mcg/kg/hr rows that couldn't be converted
+      DThydro <- DThydro[
+        !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+      ]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -4690,9 +4691,35 @@ morphine_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      #Filter out implausibly high doses
-      DTmorphine[med_dose_unit == "mg/hr" & med_dose > 50, med_dose := NA_real_]
-      DTmorphine[med_dose_unit == "mg" & med_dose > 100, med_dose := NA_real_]
+      # Plausibility filters BEFORE unit conversion
+      DTmorphine[med_dose_unit == "mg/hr"     & med_dose > 50,  med_dose := NA_real_]
+      DTmorphine[med_dose_unit == "mg"        & med_dose > 100, med_dose := NA_real_]
+      DTmorphine[med_dose_unit == "mg/kg/hr"  & med_dose > 1,   med_dose := NA_real_]
+      DTmorphine[med_dose_unit == "mcg/kg/hr" & med_dose > 500, med_dose := NA_real_]
+      
+      # Convert mg/kg/hr -> mg/hr
+      DTmorphine[
+        med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = med_dose * weight_kg,
+          med_dose_unit = "mg/hr"
+        )
+      ]
+      DTmorphine <- DTmorphine[
+        !(med_dose_unit == "mg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+      ]
+      
+      # Convert mcg/kg/hr -> mg/hr
+      DTmorphine[
+        med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose * weight_kg) / 1000,
+          med_dose_unit = "mg/hr"
+        )
+      ]
+      DTmorphine <- DTmorphine[
+        !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+      ]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -5178,9 +5205,22 @@ midazolam_total_48h <- safe_med_eval({
         end_48h
       )]
       
-      #Filter out implausibly high doses
-      DTmidaz[med_dose_unit == "mg/hr" & med_dose > 50, med_dose := NA_real_]
-      DTmidaz[med_dose_unit == "mg" & med_dose > 50, med_dose := NA_real_]
+      # Plausibility filters BEFORE unit conversion
+      DTmidaz[med_dose_unit == "mg/hr"    & med_dose > 50,  med_dose := NA_real_]
+      DTmidaz[med_dose_unit == "mg"       & med_dose > 50,  med_dose := NA_real_]
+      DTmidaz[med_dose_unit == "mg/kg/hr" & med_dose > 0.8, med_dose := NA_real_]
+      
+      # Convert mg/kg/hr -> mg/hr
+      DTmidaz[
+        med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = med_dose * weight_kg,
+          med_dose_unit = "mg/hr"
+        )
+      ]
+      DTmidaz <- DTmidaz[
+        !(med_dose_unit == "mg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+      ]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -5419,6 +5459,22 @@ lorazepam_total_48h <- safe_med_eval({
         end_imv,
         end_48h
       )]
+      
+      # Plausibility filters BEFORE unit conversion
+      DTloraz[med_dose_unit == "mg/hr"    & med_dose > 20,  med_dose := NA_real_]
+      DTloraz[med_dose_unit == "mg/kg/hr" & med_dose > 0.1, med_dose := NA_real_]
+      
+      # Convert mg/kg/hr -> mg/hr
+      DTloraz[
+        med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = med_dose * weight_kg,
+          med_dose_unit = "mg/hr"
+        )
+      ]
+      DTloraz <- DTloraz[
+        !(med_dose_unit == "mg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+      ]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -5862,13 +5918,14 @@ ketamine_total_48h <- safe_med_eval({
     # normalize units
     ketamine_expanded[, med_dose_unit := trimws(tolower(med_dose_unit))]
     
-    # Remove implausibly high doses
+    # Plausibility filters BEFORE unit conversion
     ketamine_expanded[med_dose_unit == "mg/kg/hr"  & med_dose > 10,    med_dose := NA_real_]
     ketamine_expanded[med_dose_unit == "mg/hr"     & med_dose > 700,   med_dose := NA_real_]
     ketamine_expanded[med_dose_unit == "mcg/kg/hr" & med_dose > 10000, med_dose := NA_real_]
+    ketamine_expanded[med_dose_unit == "mcg/kg/min" & med_dose > 200,  med_dose := NA_real_]
     ketamine_expanded[med_dose_unit == "mg"        & med_dose > 500,   med_dose := NA_real_]
 
-    # convert mcg/kg/hr to mg/kg/hr if it appears
+    # Convert mcg/kg/hr -> mg/kg/hr
     ketamine_expanded[
       med_dose_unit == "mcg/kg/hr",
       `:=`(
@@ -5877,7 +5934,16 @@ ketamine_total_48h <- safe_med_eval({
       )
     ]
     
-    # convert mg/hr to mg/kg/hr by dividing by weight
+    # Convert mcg/kg/min -> mg/kg/hr (mcg/kg/min * 60 / 1000 = mg/kg/hr)
+    ketamine_expanded[
+      med_dose_unit == "mcg/kg/min",
+      `:=`(
+        med_dose = (med_dose / 1000) * 60,
+        med_dose_unit = "mg/kg/hr"
+      )
+    ]
+    
+    # Convert mg/hr -> mg/kg/hr by dividing by weight
     ketamine_expanded[
       med_dose_unit == "mg/hr" & !is.na(weight_kg) & weight_kg > 0,
       `:=`(
@@ -6435,7 +6501,7 @@ paralytics_final <- safe_med_eval({
         end_48h
       )]
       
-      #Filter out implausibly high doses
+      # Filter out implausibly high doses
       DTparalytics[med_dose_unit == "mcg/kg/min" & med_dose > 30, med_dose := NA_real_]
       
       # ---------------------------
@@ -6793,7 +6859,7 @@ summary_meds_data_final <- summary_meds_data[, .(hospitalization_id, propofol_av
                                            continuous_nmba_48, continuous_nmba_start_48,
                                            continuous_nmba_hours_48, push_paralytics, cont_analgesia_only)]
 
-#Sanity Check
+# Sanity Check
 qc_output_summary <- data.table(
   variable = c("cont_prop_receipt", "cont_precedex_receipt", "cont_opioids_receipt",
                "cont_benzos_receipt", "cont_ketamine_receipt", "cont_pentobarbital_receipt",
@@ -6820,7 +6886,6 @@ qc_dose_summary <- summary_meds_data_final[, .(
 fwrite(qc_dose_summary, 
   file.path(cohort_characteristics, paste0(institution, "_part_five_qc_dose_summary.csv")))
 ```
-
 
 # PART SIX: Identify acute respiratory failure patients
 ```{r}
