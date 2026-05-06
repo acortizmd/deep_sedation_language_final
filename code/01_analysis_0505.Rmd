@@ -390,7 +390,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
     dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
     dsub[is.na(x), x := "missing"]
     levs <- sort(unique(dsub$x))
-    if (length(levs) < 2) return(NA_real_)
+    if (length(levs) < 2) return(list(smd = NA_real_, smd_se = NA_real_))
     ref_lev <- levs[1]
     keep_levs <- levs[levs != ref_lev]
     make_indicator_matrix <- function(vals, levels_keep) {
@@ -399,7 +399,8 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
       out
     }
     x1 <- dsub[group == g1, x]; x2 <- dsub[group == g2, x]
-    if (length(x1) < 2 || length(x2) < 2) return(NA_real_)
+    n1 <- length(x1); n2 <- length(x2)
+    if (n1 < 2 || n2 < 2) return(list(smd = NA_real_, smd_se = NA_real_))
     M1 <- make_indicator_matrix(x1, keep_levs)
     M2 <- make_indicator_matrix(x2, keep_levs)
     p1 <- colMeans(M1); p2 <- colMeans(M2); d <- p2 - p1
@@ -409,11 +410,17 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
     S_pooled <- (S1 + S2) / 2
     S_inv <- try(solve(S_pooled), silent = TRUE)
     if (inherits(S_inv, "try-error")) {
-      if (!requireNamespace("MASS", quietly = TRUE)) return(NA_real_)
+      if (!requireNamespace("MASS", quietly = TRUE)) return(list(smd = NA_real_, smd_se = NA_real_))
       S_inv <- try(MASS::ginv(S_pooled), silent = TRUE)
-      if (inherits(S_inv, "try-error")) return(NA_real_)
+      if (inherits(S_inv, "try-error")) return(list(smd = NA_real_, smd_se = NA_real_))
     }
-    as.numeric(sqrt(t(d) %*% S_inv %*% d))
+    smd_val <- as.numeric(sqrt(t(d) %*% S_inv %*% d))
+    # Yang & Dalton (2012) variance approximation for multivariate SMD:
+    #   Var(d_M) ≈ (n1+n2)/(n1*n2) * k + d_M^2 / (2*(n1+n2))
+    # where k is the number of non-reference categories.
+    k <- length(keep_levs)
+    smd_se_val <- sqrt((n1 + n2) / (n1 * n2) * k + smd_val^2 / (2 * (n1 + n2)))
+    list(smd = smd_val, smd_se = smd_se_val)
   }
 
   #--------------------------------------------------#
@@ -455,10 +462,14 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
       }
     }
     
-    pooled_sd <- NA_real_; smd <- NA_real_
+    pooled_sd <- NA_real_; smd <- NA_real_; smd_se <- NA_real_
     if (n1 >= 2 && n2 >= 2 && !is.na(sd1) && !is.na(sd2)) {
       pooled_sd <- sqrt(((n1 - 1) * sd1^2 + (n2 - 1) * sd2^2) / (n1 + n2 - 2))
-      if (!is.na(pooled_sd) && pooled_sd > 0) smd <- (mean2 - mean1) / pooled_sd
+      if (!is.na(pooled_sd) && pooled_sd > 0) {
+        smd <- (mean2 - mean1) / pooled_sd
+        # Hedges large-sample SE (this is the form metafor::escalc uses)
+        smd_se <- sqrt((n1 + n2) / (n1 * n2) + smd^2 / (2 * (n1 + n2)))
+      }
     }
     
     data.table(
@@ -472,7 +483,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
       group1_p75 = p75_1, group2_p75 = p75_2,
       statistic = "mean_difference", estimate = estimate,
       ci_lower = ci_lower, ci_upper = ci_upper, p_value = p_value,
-      smd = smd, effect_measure = "mean_difference",
+      smd = smd, smd_se = smd_se, effect_measure = "mean_difference",
       test = test_used, note = NA_character_
     )
   }
@@ -502,7 +513,9 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
     n1 <- sum(tab[, g1])
     n2 <- sum(tab[, g2])
     
-    overall_smd <- calc_multilevel_smd(dsub$x, dsub$group, g1, g2)
+    overall_smd_result <- calc_multilevel_smd(dsub$x, dsub$group, g1, g2)
+    overall_smd    <- overall_smd_result$smd
+    overall_smd_se <- overall_smd_result$smd_se
     
     p_value <- NA_real_; test_used <- NA_character_
     if (n_levels >= 1) {
@@ -533,7 +546,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
       group1_p75 = NA_real_, group2_p75 = NA_real_,
       statistic = "overall_difference", estimate = NA_real_,
       ci_lower = NA_real_, ci_upper = NA_real_, p_value = p_value,
-      smd = overall_smd, effect_measure = "categorical_smd",
+      smd = overall_smd, smd_se = overall_smd_se, effect_measure = "categorical_smd",
       test = test_used, note = NA_character_
     )
     
@@ -554,6 +567,11 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
       pooled_p <- if (!is.na(p1) && !is.na(p2)) (p1 + p2) / 2 else NA_real_
       smd_binary <- if (!is.na(pooled_p) && pooled_p > 0 && pooled_p < 1)
         (p2 - p1) / sqrt(pooled_p * (1 - pooled_p)) else NA_real_
+      # Hedges-style SE for the binary SMD. n1=(c+d), n2=(a+b) here.
+      n1_bin <- c + d; n2_bin <- a + b
+      smd_binary_se <- if (!is.na(smd_binary) && n1_bin > 1 && n2_bin > 1)
+        sqrt((n1_bin + n2_bin) / (n1_bin * n2_bin) +
+               smd_binary^2 / (2 * (n1_bin + n2_bin))) else NA_real_
       
       out_rd <- data.table(
         site = site_name, variable = var_name, variable_type = "categorical",
@@ -566,7 +584,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
         group1_p75 = NA_real_, group2_p75 = NA_real_,
         statistic = "risk_difference", estimate = rd,
         ci_lower = rd_lcl, ci_upper = rd_ucl, p_value = p_value,
-        smd = smd_binary, effect_measure = "risk_difference",
+        smd = smd_binary, smd_se = smd_binary_se, effect_measure = "risk_difference",
         test = test_used,
         note = sprintf("Binary categorical variable. level='%s' treated as event.", target_level)
       )
@@ -623,6 +641,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
         ci_upper      = NA_real_,
         p_value       = NA_real_,
         smd           = NA_real_,
+        smd_se        = NA_real_,
         group1_mean   = NA_real_,
         group2_mean   = NA_real_,
         group1_sd     = NA_real_,
@@ -692,7 +711,7 @@ make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
     "group1_median", "group2_median", "group1_p25", "group2_p25",
     "group1_p75", "group2_p75",
     "statistic", "estimate", "ci_lower", "ci_upper",
-    "p_value", "smd", "effect_measure", "test", "note"
+    "p_value", "smd", "smd_se", "effect_measure", "test", "note"
   )
   existing_order <- desired_order[desired_order %in% names(out)]
   setcolorder(out, existing_order)
