@@ -6,3 +6,11 @@
 # Sensitive/large data
 intermittent_data_DO_NOT_UPLOAD/
 output/
+manuscript_aggregate/
+figures/
+federated_inputs/
+pooled_outputs/
+static_figures/
+
+# Site specific data
+config/deep_sedation_language_config.yaml
