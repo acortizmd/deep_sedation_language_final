@@ -4158,6 +4158,12 @@ fentanyl_total_48h <- safe_med_eval({
     med_dose_unit = "mcg/hr"
     )
   ]
+  
+  # Convert mg boluses -> mcg (some sites store fentanyl boluses in mg)
+  fentanyl_expanded[
+    med_dose_unit == "mg",
+    `:=`(med_dose = med_dose * 1000, med_dose_unit = "mcg")
+    ]
 
   # Drop rows that still cannot be interpreted safely
   fentanyl_expanded <- fentanyl_expanded[
@@ -4200,6 +4206,9 @@ fentanyl_total_48h <- safe_med_eval({
         end_imv,
         end_48h
       )]
+      
+      # Plausibility filter
+      DTfent[med_dose_unit == "mcg" & med_dose > 2000, med_dose := NA_real_]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -4449,6 +4458,7 @@ hydromorphone_total_48h <- safe_med_eval({
       DThydro[med_dose_unit == "mg/hr"     & med_dose > 20,  med_dose := NA_real_]
       DThydro[med_dose_unit == "mg"        & med_dose > 20,  med_dose := NA_real_]
       DThydro[med_dose_unit == "mcg/kg/hr" & med_dose > 100, med_dose := NA_real_]
+      DThydro[med_dose_unit == "mcg/hr" & med_dose > 100000, med_dose := NA_real_]
       
       # Convert mcg/kg/hr -> mg/hr
       DThydro[
@@ -4458,6 +4468,12 @@ hydromorphone_total_48h <- safe_med_eval({
           med_dose_unit = "mg/hr"
         )
       ]
+      # Convert mcg/hr to mg/hr
+      DThydro[
+        med_dose_unit == "mcg/hr",
+        `:=`(med_dose = med_dose / 1000, med_dose_unit = "mg/hr")
+        ]
+      
       # Drop mcg/kg/hr rows that couldn't be converted
       DThydro <- DThydro[
         !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
@@ -4715,6 +4731,7 @@ morphine_total_48h <- safe_med_eval({
       
       # Plausibility filters BEFORE unit conversion
       DTmorphine[med_dose_unit == "mg/hr"     & med_dose > 50,  med_dose := NA_real_]
+      DTmorphine[med_dose_unit == "mcg/hr"  & med_dose > 50000, med_dose := NA_real_]
       DTmorphine[med_dose_unit == "mg"        & med_dose > 100, med_dose := NA_real_]
       DTmorphine[med_dose_unit == "mg/kg/hr"  & med_dose > 1,   med_dose := NA_real_]
       DTmorphine[med_dose_unit == "mcg/kg/hr" & med_dose > 500, med_dose := NA_real_]
@@ -4742,6 +4759,12 @@ morphine_total_48h <- safe_med_eval({
       DTmorphine <- DTmorphine[
         !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
       ]
+      
+      # Convert mcg/hr to mg/hr
+      DTmorphine[
+        med_dose_unit == "mcg/hr",
+        `:=`(med_dose = med_dose / 1000, med_dose_unit = "mg/hr")
+        ]
       
       # ---------------------------
       # Split infusion vs bolus
@@ -5486,7 +5509,15 @@ midazolam_total_48h <- safe_med_eval({
       # Plausibility filters BEFORE unit conversion
       DTmidaz[med_dose_unit == "mg/hr"    & med_dose > 50,  med_dose := NA_real_]
       DTmidaz[med_dose_unit == "mg"       & med_dose > 50,  med_dose := NA_real_]
-      DTmidaz[med_dose_unit == "mg/kg/hr" & med_dose > 0.8, med_dose := NA_real_]
+      DTmidaz[med_dose_unit == "mg/kg/hr" & med_dose > 1.0, med_dose := NA_real_]
+      DTmidaz[med_dose_unit == "mcg/kg/hr" & med_dose > 1000, med_dose := NA_real_]
+      DTmidaz[med_dose_unit == "mcg/hr" & med_dose > 60000, med_dose := NA_real_]
+      
+      #Convert mcg/hr to mg/hr
+      DTmidaz[
+        med_dose_unit == "mcg/hr",
+        `:=`(med_dose = med_dose / 1000, med_dose_unit = "mg/hr")
+        ]
       
       # Convert mg/kg/hr -> mg/hr
       DTmidaz[
@@ -5496,6 +5527,20 @@ midazolam_total_48h <- safe_med_eval({
           med_dose_unit = "mg/hr"
         )
       ]
+      
+      # Convert mcg/kg/hr to mg/kg/hr
+      DTmidaz[
+        med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose / 1000) * weight_kg,   # mcg/kg/hr -> mg/kg/hr -> mg/hr
+          med_dose_unit = "mg/hr"
+          )
+        ]
+      
+      # Everyone should have weights but if they don't this will remove them
+      DTmidaz <- DTmidaz[
+        !(med_dose_unit == "mcg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
       DTmidaz <- DTmidaz[
         !(med_dose_unit == "mg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
       ]
@@ -5741,6 +5786,13 @@ lorazepam_total_48h <- safe_med_eval({
       # Plausibility filters BEFORE unit conversion
       DTloraz[med_dose_unit == "mg/hr"    & med_dose > 20,  med_dose := NA_real_]
       DTloraz[med_dose_unit == "mg/kg/hr" & med_dose > 0.1, med_dose := NA_real_]
+      DTloraz[med_dose_unit == "mcg/hr" & med_dose > 20000, med_dose := NA_real_]
+      
+      # Convert mcg/hr to mg/hr
+      DTloraz[
+        med_dose_unit == "mcg/hr",
+        `:=`(med_dose = med_dose / 1000, med_dose_unit = "mg/hr")
+        ]
       
       # Convert mg/kg/hr -> mg/hr
       DTloraz[
@@ -6271,6 +6323,22 @@ ketamine_total_48h <- safe_med_eval({
         end_48h
       )]
       
+      # Plausibility Screening
+      DTketa[med_dose_unit == "mcg/hr" & med_dose > 700000, med_dose := NA_real_]
+      
+      # Convert mcg/hr to mcg/kg/hr
+      DTketa[
+        med_dose_unit == "mcg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose / 1000) / weight_kg,   # mcg/hr -> mg/hr -> mg/kg/hr
+          med_dose_unit = "mg/kg/hr"
+          )
+        ]
+      # Everyone should have weight data but if they don't then this will remove those rows
+      DTketa <- DTketa[
+        !(med_dose_unit == "mcg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
+      
       # ---------------------------
       # Split infusion vs bolus
       # ---------------------------
@@ -6779,6 +6847,9 @@ paralytics_final <- safe_med_eval({
         end_48h
       )]
       
+      #Filter
+      DTparalytics[med_dose_unit == "mcg/hr" & med_dose > 500000, med_dose := NA_real_]
+      
       # Convert mg/hr -> mcg/kg/min
       DTparalytics[
         med_dose_unit == "mg/hr" & !is.na(weight_kg) & weight_kg > 0,
@@ -6789,6 +6860,20 @@ paralytics_final <- safe_med_eval({
         ]
       DTparalytics <- DTparalytics[
         !(med_dose_unit == "mg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
+      
+      # Convert mcg/hr to mcg/kg/min
+      DTparalytics[
+        med_dose_unit == "mcg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose / 60) / weight_kg,
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
+      
+      # Everyone should have weights but just in case - this will filter those rows out
+      DTparalytics <- DTparalytics[
+        !(med_dose_unit == "mcg/hr" & (is.na(weight_kg) | weight_kg <= 0))
         ]
       
       # Filter out implausibly high doses
