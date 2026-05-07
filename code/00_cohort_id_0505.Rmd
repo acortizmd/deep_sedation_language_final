@@ -6871,9 +6871,21 @@ paralytics_final <- safe_med_eval({
           )
         ]
       
+      # Convert mg/kg/hr -> mcg/kg/min
+      DTparalytics[
+        med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = (med_dose / 60) * 1000,
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
+
       # Everyone should have weights but just in case - this will filter those rows out
       DTparalytics <- DTparalytics[
         !(med_dose_unit == "mcg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
+      DTparalytics <- DTparalytics[
+        !(med_dose_unit == "mg/kg/hr" & (is.na(weight_kg) | weight_kg <= 0))
         ]
       
       # Filter out implausibly high doses
