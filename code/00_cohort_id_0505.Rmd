@@ -3930,6 +3930,19 @@ precedex_total_48h <- safe_med_eval({
       DTdex[med_dose_unit == "mcg/kg/hr" & med_dose > 5,   med_dose := NA_real_]
       DTdex[med_dose_unit == "mcg/kg/min" & med_dose > 0.1, med_dose := NA_real_]
       DTdex[med_dose_unit == "mcg" & med_dose > 500,        med_dose := NA_real_]
+      DTdex[med_dose_unit == "mcg/hr" & med_dose > 200, med_dose := NA_real_]
+      
+      #Convert mcg/hr to mcg/kr/hr
+      DTdex[
+        med_dose_unit == "mcg/hr" & !is.na(weight_kg) & weight_kg > 0,
+        `:=`(
+          med_dose      = med_dose / weight_kg,
+          med_dose_unit = "mcg/kg/hr"
+          )
+        ]
+      DTdex <- DTdex[
+        !(med_dose_unit == "mcg/hr" & (is.na(weight_kg) | weight_kg <= 0))
+        ]
       
       # ---------------------------
       # Split infusion vs push
@@ -5528,7 +5541,7 @@ midazolam_total_48h <- safe_med_eval({
         )
       ]
       
-      # Convert mcg/kg/hr to mg/kg/hr
+      # Convert mcg/kg/hr to mg/hr
       DTmidaz[
         med_dose_unit == "mcg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
         `:=`(
@@ -6876,6 +6889,15 @@ paralytics_final <- safe_med_eval({
         med_dose_unit == "mg/kg/hr" & !is.na(weight_kg) & weight_kg > 0,
         `:=`(
           med_dose      = (med_dose / 60) * 1000,
+          med_dose_unit = "mcg/kg/min"
+          )
+        ]
+      
+      # Convert mcg/kg/hr -> mcg/kg/min
+      DTparalytics[
+        med_dose_unit == "mcg/kg/hr",
+        `:=`(
+          med_dose      = med_dose / 60,
           med_dose_unit = "mcg/kg/min"
           )
         ]
