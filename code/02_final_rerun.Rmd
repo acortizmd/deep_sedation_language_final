@@ -1,0 +1,3634 @@
+#START
+```{r setup}
+# Install Packages
+
+packages <- c("tidyverse", "zoo", "data.table", "dplyr", "lubridate", "tidyr", "fst", "arrow", "table1", "lme4", "metafor", "yaml", "pscl", "MASS", "htmltools", "car", "WeightIt", "MatchIt", "purrr", "survival", "mediation", "cmprsk", "gfoRmula", "nnet", "medflex", "bruceR", "survey", "ipw", "geepack", "readr", "collapse", "stringr", "rprojroot", "tableone", "lmtest", "broom", "sandwich", "pROC", "ResourceSelection")
+install_if_missing <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    library(package, character.only = TRUE)
+  }
+}
+
+sapply(packages, install_if_missing)
+
+# Load necessary libraries
+library(data.table)
+library(dplyr)
+library(zoo)  # for na.locf function
+library(lubridate)
+library(tidyr)
+library(fst)
+library(arrow)
+library(table1)
+library(metafor)
+library(yaml)
+library(htmltools)
+library(MASS)
+library(pscl)
+library(car)
+library(stringr)
+library(rprojroot)
+library(tableone)
+library(lmtest)
+library(broom)
+library(sandwich)
+library(pROC)
+library(ResourceSelection)
+
+
+# Define paths
+project_root <- file.path(
+  find_root(rprojroot::has_dir("deep_sedation_language_final")),
+  "deep_sedation_language_final"
+)
+
+config_dir <- file.path(project_root, "config")
+knitr::opts_knit$set(root.dir = config_dir)
+
+# Look for both .yaml and .yml
+config_file <- c(
+  file.path(config_dir, "deep_sedation_language_config.yaml"),
+  file.path(config_dir, "deep_sedation_language_config.yml")
+)
+
+# Keep only existing files
+config_file <- config_file[file.exists(config_file)]
+
+# Error if neither exists
+if (length(config_file) == 0) {
+  stop("No config file found (.yaml or .yml)")
+}
+
+# If both exist, take the first (yaml prioritized here)
+config <- yaml::read_yaml(config_file[1])
+
+# Define directories based on YAML configuration
+data_dir <- config$data_dir
+local_dir <- config$local_dir
+output_dir <- file.path(local_dir, "output/")
+intermediate_dir <- file.path(local_dir, "intermediate_data_DO_NOT_UPLOAD/")  # Define output_dir based on data_dir
+final_data_dir <- file.path(output_dir, "FINAL_DATA_UPLOAD_ME/")
+rerun_data_dir <- file.path(output_dir, "RERUN_DATA_UPLOAD_ME/")
+rerun_tables_dir <- file.path(rerun_data_dir, "rerun_tables")
+rerun_final_data <- file.path(rerun_data_dir, "rerun_data")
+rerun_paralytics <- file.path(rerun_data_dir, "rerun_paralytics_data")
+cohort_characteristics <- file.path(final_data_dir, "cohort_characteristics/")
+sedation_project <- file.path(final_data_dir, "sedation_project/")
+sedation_tables_dir <- file.path(sedation_project, "final_tables/")
+sedation_final_data <- file.path(sedation_project, "final_data/")
+sedation_sensitivity <- file.path(sedation_final_data, "sensitivity_analyses/")
+sedation_secondary <- file.path(sedation_final_data, "secondary_analyses/")
+sedation_exploratory <- file.path(sedation_final_data, "exploratory_analyses/")
+sedation_subgroup <- file.path(sedation_final_data, "subgroup_analyses/")
+paralytics_project <- file.path(final_data_dir, "paralytics_project/")
+paralytics_tables_dir <- file.path(paralytics_project, "final_tables/")  
+paralytics_final_data <- file.path(paralytics_project, "final_data/")
+paralytics_exploratory <- file.path(paralytics_final_data, "exploratory_analyses/")
+paralytics_exploratory_tables <- file.path(paralytics_tables_dir, "exploratory_tables/")
+arf_project <- file.path(final_data_dir, "arf_project/")
+arf_tables_dir <- file.path(arf_project, "final_tables/")  
+arf_final_data <- file.path(arf_project, "final_data/")
+measurements_project <- file.path(final_data_dir, "measurements_project/")
+measurements_tables_dir <- file.path(measurements_project, "final_tables/")  
+measurements_final_data <- file.path(measurements_project, "final_data/")
+measurements_model_data <- file.path(measurements_final_data, "model_data/")
+
+file_type <- config$file_type
+institution <- config$institution
+time_zone <- config$time_zone
+
+# Create all directories
+dirs_to_create <- c(
+  output_dir,
+  intermediate_dir,
+  final_data_dir,
+  cohort_characteristics,
+  sedation_project,
+  sedation_tables_dir,
+  sedation_final_data,
+  sedation_sensitivity,
+  sedation_secondary,
+  sedation_exploratory,
+  sedation_subgroup,
+  paralytics_project,
+  paralytics_tables_dir,
+  paralytics_final_data,
+  paralytics_exploratory,
+  paralytics_exploratory_tables,
+  arf_project,
+  arf_tables_dir,
+  arf_final_data,
+  measurements_project,
+  measurements_tables_dir,
+  measurements_final_data,
+  measurements_model_data,
+  rerun_data_dir,
+  rerun_tables_dir,
+  rerun_final_data,
+  rerun_paralytics
+)
+
+for (dir in dirs_to_create) {
+  dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+}
+```
+
+#Upload Data
+```{r}
+# Upload Analytic File
+total_cohort <- read_parquet(paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
+setDT(total_cohort)
+total_cohort[
+  race_category == "asian",
+  race_category := "other/unknown"
+]
+total_cohort[, observation_year := as.double(observation_year)]
+# Upload hospital system language information
+language_data <- fread(paste0(cohort_characteristics, "/", institution, "_hospital_system_language_counts", ".csv"))
+setDT(language_data)
+
+cat_vars <- c("hospital_id", "icu_imv", "hospital_type")
+
+cont_vars <- c()
+
+```
+
+
+#PART ZERO: Fix Hospitalization
+```{r}
+# This block adjusts for hospitalizations that are continuous within a health system.
+# It looks at patient_id, discharge_dttm, and admission_dttm for hospitalization_ids
+# that are close in time, creates new chronological hospitalization_ids, and builds
+# a crosswalk (hosp_map) used by read_data() to remap all downstream tables.
+
+read_data_start <- function(file_path, select = NULL) {
+  if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
+    dt <- fread(file_path, select = select)
+  } else if (grepl("\\.parquet$", file_path)) {
+    if (is.null(select)) {
+      dt <- arrow::read_parquet(file_path)
+    } else {
+      dt <- arrow::read_parquet(file_path, col_select = all_of(select))
+    }
+  } else if (grepl("\\.fst$", file_path)) {
+    if (is.null(select)) {
+      dt <- fst::read_fst(file_path)
+    } else {
+      dt <- fst::read_fst(file_path, columns = all_of(select))
+    }
+  } else {
+    stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
+  }
+
+  dt <- data.table::as.data.table(dt)
+
+  dttm_cols <- names(dt)[grepl("dttm$", names(dt))]
+  local_tz  <- time_zone
+  message("Using timezone: ", local_tz)
+
+  for (var in dttm_cols) {
+    col <- dt[[var]]
+
+    if (inherits(col, "POSIXct")) {
+      existing_tz <- attr(col, "tzone")
+
+      # Already matches local tz — do nothing
+      if (!is.null(existing_tz) && nzchar(existing_tz) && existing_tz == local_tz) {
+        message("✅ ", var, ": tzone already '", local_tz, "', no change")
+        next
+      }
+
+      # Blank or NULL — timestamps already in local time, just stamp the label
+      if (is.null(existing_tz) || !nzchar(existing_tz)) {
+        dt[, (var) := lubridate::force_tz(get(var), tzone = local_tz)]
+        message("🔧 ", var, ": tzone was blank/null, stamped as '", local_tz, "' (no clock shift)")
+        next
+      }
+
+      # UTC or GMT — timestamps are genuinely UTC, convert with clock shift
+      if (existing_tz %in% c("UTC", "GMT")) {
+        dt[, (var) := lubridate::with_tz(get(var), tzone = local_tz)]
+        message("🌍 ", var, ": tzone was '", existing_tz, "', converted to '", local_tz, "' (clock shifted)")
+        next
+      }
+
+      # Different real timezone — warn and leave alone
+      warning("⚠️  ", var, ": tzone is '", existing_tz, "', which differs from YAML time_zone '",
+              local_tz, "'. Leaving as-is. Check your source data.")
+      next
+    }
+
+    if (inherits(col, "Date")) {
+      dt[, (var) := lubridate::force_tz(as.POSIXct(get(var)), tzone = local_tz)]
+      message("📅 ", var, ": Date -> POSIXct midnight, stamped as '", local_tz, "'")
+      next
+    }
+
+    raw_vec <- if (is.factor(col)) as.character(col) else col
+    suppressWarnings(parsed <- lubridate::ymd_hms(raw_vec, quiet = TRUE))
+    bad_idx <- is.na(parsed) & !is.na(raw_vec) & nzchar(trimws(raw_vec))
+    if (any(bad_idx)) {
+      suppressWarnings(parsed_date <- lubridate::ymd(raw_vec[bad_idx], quiet = TRUE))
+      parsed[bad_idx] <- as.POSIXct(parsed_date)
+    }
+    dt[, (var) := lubridate::force_tz(parsed, tzone = local_tz)]
+    message("🔧 ", var, ": parsed from character/factor, stamped as '", local_tz, "'")
+  }
+
+  dt %>% glimpse()
+  return(dt)
+}
+
+# Load and clean hospitalization table
+clif_hospitalization_start <-
+  read_data_start(paste0(data_dir, "clif_hospitalization", file_type)) |>
+  dplyr::select(hospitalization_id, admission_dttm, discharge_dttm, age_at_admission,
+                patient_id, discharge_name, discharge_category) |>
+  mutate(across(where(is.factor), as.character)) |>
+  mutate(across(where(is.character), str_to_lower)) |>
+  as.data.table()
+
+# Identify linked encounters (admissions within 6 hours of a discharge)
+hospital_blocks <- clif_hospitalization_start[, .(patient_id, hospitalization_id, admission_dttm, discharge_dttm)]
+setorder(hospital_blocks, patient_id, admission_dttm)
+
+hospital_blocks[, next_diff_time := as.numeric(difftime(
+  shift(admission_dttm, type = "lead"), discharge_dttm, units = "hours"
+)), by = patient_id]
+
+hospital_blocks[, prev_diff_time := as.numeric(difftime(
+  admission_dttm, shift(discharge_dttm, type = "lag"), units = "hours"
+)), by = patient_id]
+
+hospital_blocks[, linked := as.integer(next_diff_time < 6 | prev_diff_time < 6)]
+
+# Number link groups within patient using cumsum
+hospital_blocks[, link_group := {
+  is_new_group <- is.na(shift(linked)) | linked == 0 |
+                  (linked == 1 & (is.na(prev_diff_time) | prev_diff_time >= 6))
+  cumsum(is_new_group)
+}, by = patient_id]
+
+# Merge link group back to full hospitalization table
+clif_hospitalization_start <- hospital_blocks[
+  clif_hospitalization_start,
+  on = .(patient_id, hospitalization_id)
+]
+
+# Unlinked hospitalizations get their own block
+clif_hospitalization_start[is.na(linked), link_group := .I]
+clif_hospitalization_start[, encounter_block := .GRP, by = .(patient_id, link_group)]
+
+# Collapse to one row per encounter block
+clif_hospitalization <- clif_hospitalization_start[
+  , .(
+    hospitalization_id  = hospitalization_id[1],
+    age_at_admission    = age_at_admission[1],
+    admission_dttm      = admission_dttm[1],
+    discharge_dttm      = discharge_dttm[.N],
+    discharge_name      = discharge_name[.N],
+    discharge_category  = discharge_category[.N]
+  ),
+  by = .(patient_id, encounter_block)
+][, clif_hospitalizations_joined_id := .I]
+
+# Build hosp_map crosswalk for downstream remapping in read_data()
+hosp_map <- clif_hospitalization_start[
+  clif_hospitalization,
+  on = .(patient_id, encounter_block),
+  .(
+    old_hosp_id              = x.hospitalization_id,
+    new_hosp_id              = clif_hospitalizations_joined_id,
+    final_admit              = i.admission_dttm,
+    final_discharge          = i.discharge_dttm,
+    final_discharge_name     = i.discharge_name,
+    final_discharge_category = i.discharge_category
+  )
+]
+```
+
+
+# PART ONE: Upload clif tables
+```{r}
+read_data <- function(file_path, select = NULL) {
+
+  # ---- 1) Read ----
+  if (grepl("\\.csv$|\\.csv\\.gz$", file_path)) {
+    dt <- data.table::fread(file_path, select = select)
+
+  } else if (grepl("\\.parquet$", file_path)) {
+    if (is.null(select)) {
+      dt <- arrow::read_parquet(file_path)
+    } else {
+      dt <- arrow::read_parquet(file_path, col_select = tidyselect::all_of(select))
+    }
+
+  } else if (grepl("\\.fst$", file_path)) {
+    if (is.null(select)) {
+      dt <- fst::read_fst(file_path)
+    } else {
+      dt <- fst::read_fst(file_path, columns = tidyselect::all_of(select))
+    }
+
+  } else {
+    stop("Unsupported file format. Only CSV, Parquet, and FST are supported.")
+  }
+
+  dt <- data.table::as.data.table(dt)
+
+  # ---- 2) Optional remap using hosp_map ----
+  if (exists("hosp_map", envir = .GlobalEnv) && "hospitalization_id" %in% names(dt)) {
+
+    hm <- data.table::as.data.table(get("hosp_map", envir = .GlobalEnv))
+    if (!"old_hosp_id" %in% names(hm)) stop("hosp_map missing old_hosp_id")
+
+    hm[, old_hosp_id := as.character(old_hosp_id)]
+    if ("new_hosp_id" %in% names(hm)) hm[, new_hosp_id := as.character(new_hosp_id)]
+
+    dt[, hospitalization_id := as.character(hospitalization_id)]
+
+    has_dates <- all(c("admission_dttm", "discharge_dttm") %in% names(dt))
+
+    if (has_dates) {
+      message("🔄 remapping hosp_id, admit & discharge")
+      dt <- hm[dt, on = .(old_hosp_id = hospitalization_id)]
+      dt[, hospitalization_id := data.table::fcoalesce(new_hosp_id, old_hosp_id)]
+
+      if ("final_admit"              %in% names(dt)) dt[, admission_dttm       := data.table::fcoalesce(final_admit,              admission_dttm)]
+      if ("final_discharge"          %in% names(dt)) dt[, discharge_dttm       := data.table::fcoalesce(final_discharge,          discharge_dttm)]
+      if ("final_discharge_name"     %in% names(dt)) dt[, discharge_name       := data.table::fcoalesce(final_discharge_name,     discharge_name)]
+      if ("final_discharge_category" %in% names(dt)) dt[, discharge_category   := data.table::fcoalesce(final_discharge_category, discharge_category)]
+
+    } else {
+      message("🔄 remapping just hosp_id")
+      dt <- hm[dt, on = .(old_hosp_id = hospitalization_id)]
+      dt[, hospitalization_id := data.table::fcoalesce(new_hosp_id, old_hosp_id)]
+    }
+
+    drop_cols <- intersect(
+      c("new_hosp_id", "old_hosp_id", "final_admit", "final_discharge",
+        "final_discharge_name", "final_discharge_category"),
+      names(dt)
+    )
+    if (length(drop_cols)) dt[, (drop_cols) := NULL]
+  }
+
+  # ---- 3) Normalize all *_dttm columns ----
+  dttm_cols <- names(dt)[grepl("dttm$", names(dt))]
+  local_tz  <- time_zone
+  message("Using timezone: ", local_tz)
+
+  for (var in dttm_cols) {
+    col <- dt[[var]]
+
+    if (inherits(col, "POSIXct")) {
+      existing_tz <- attr(col, "tzone")
+
+      # Already matches local tz — do nothing
+      if (!is.null(existing_tz) && nzchar(existing_tz) && existing_tz == local_tz) {
+        message("✅ ", var, ": tzone already '", local_tz, "', no change")
+        next
+      }
+
+      # Blank or NULL — timestamps already in local time, just stamp the label
+      if (is.null(existing_tz) || !nzchar(existing_tz)) {
+        dt[, (var) := lubridate::force_tz(get(var), tzone = local_tz)]
+        message("🔧 ", var, ": tzone was blank/null, stamped as '", local_tz, "' (no clock shift)")
+        next
+      }
+
+      # UTC or GMT — timestamps are genuinely UTC, convert with clock shift
+      if (existing_tz %in% c("UTC", "GMT")) {
+        dt[, (var) := lubridate::with_tz(get(var), tzone = local_tz)]
+        message("🌍 ", var, ": tzone was '", existing_tz, "', converted to '", local_tz, "' (clock shifted)")
+        next
+      }
+
+      # Different real timezone — warn and leave alone
+      warning("⚠️  ", var, ": tzone is '", existing_tz, "', which differs from YAML time_zone '",
+              local_tz, "'. Leaving as-is. Check your source data.")
+      next
+    }
+
+    # Date columns
+    if (inherits(col, "Date")) {
+      if (identical(var, "death_dttm")) {
+        dt[, (var) := lubridate::force_tz(
+          as.POSIXct(get(var)) + lubridate::hours(23) + lubridate::minutes(59),
+          tzone = local_tz
+        )]
+        message("📅 ", var, ": Date -> POSIXct 23:59, stamped as '", local_tz, "'")
+      } else {
+        dt[, (var) := lubridate::force_tz(as.POSIXct(get(var)), tzone = local_tz)]
+        message("📅 ", var, ": Date -> POSIXct midnight, stamped as '", local_tz, "'")
+      }
+      next
+    }
+
+    # Character / factor — parse then stamp
+    raw_vec <- if (is.factor(col)) as.character(col) else col
+
+    suppressWarnings(parsed <- lubridate::ymd_hms(raw_vec, quiet = TRUE))
+
+    bad_idx <- is.na(parsed) & !is.na(raw_vec) & nzchar(trimws(raw_vec))
+    if (any(bad_idx)) {
+      suppressWarnings(parsed_date <- lubridate::ymd(raw_vec[bad_idx], quiet = TRUE))
+      offset <- if (identical(var, "death_dttm")) lubridate::hours(23) + lubridate::minutes(59) else 0
+      parsed[bad_idx] <- as.POSIXct(parsed_date) + offset
+    }
+
+    dt[, (var) := lubridate::force_tz(parsed, tzone = local_tz)]
+    message("🔧 ", var, ": parsed from character/factor, stamped as '", local_tz, "'")
+  }
+
+  # ---- 4) Peek & return ----
+  if (nrow(dt) > 0) utils::str(head(dt))
+  return(dt)
+}
+
+#Hospitalization
+hospitalization <- as.data.table(read_data(paste0(data_dir, "clif_hospitalization", file_type)))
+hospitalization <- unique(hospitalization, by = "hospitalization_id")
+#Filter Out Incomplete Hospitalizations
+hospitalization <- hospitalization[!is.na(admission_dttm) & !is.na(discharge_dttm) & discharge_dttm >= admission_dttm]
+hospitalization[, admission_type_category := tolower(admission_type_category)]
+hospitalization[, discharge_category := tolower(discharge_category)]
+
+
+#ADT 
+adt <- as.data.table(read_data(paste0(data_dir, "clif_adt", file_type), select = c("hospitalization_id", "hospital_id", "hospital_type", "in_dttm", "out_dttm", "location_category", "location_type")))
+setorder(adt, hospitalization_id, in_dttm) 
+
+adt_hospital_type_counts <- adt[
+  , .N,
+  by = .(hospital_id, hospital_type)
+][
+  order(hospital_id, hospital_type)
+]
+
+hospital_id_type_final <- adt[
+  , .N,
+  by = .(hospital_id, hospital_type)
+][
+  order(hospital_id, -N)
+][
+  , .SD[1],
+  by = hospital_id
+]
+
+# Add hospital_type to total_cohort
+total_cohort <- hospital_id_type_final[
+  total_cohort,
+  on = "hospital_id"
+]
+total_cohort[, N := NULL]
+
+```
+
+
+#Function to Create Table 1s
+```{r}
+#Function to Create Table 1s
+make_table1_federated <- function(dt,
+                                  cat_vars = NULL,
+                                  cont_vars = NULL,
+                                  by = NULL,
+                                  site_name = NA_character_) {
+  dt <- as.data.table(copy(dt))
+  out_list <- list()
+  
+  #-----------------------------#
+  # CATEGORICAL VARIABLES
+  #-----------------------------#
+  if (!is.null(cat_vars) && length(cat_vars) > 0) {
+    for (v in cat_vars) {
+      
+      if (!is.null(by)) {
+        tmp <- dt[, .(n = .N), by = c(by, v)]
+        
+        totals <- dt[, .(N = .N), by = by]
+        
+        tmp <- merge(tmp, totals, by = by, all.x = TRUE)
+        
+        setnames(tmp, old = by, new = "group")
+        setnames(tmp, old = v, new = "level")
+        
+        tmp[, `:=`(
+          site = site_name,
+          variable = v,
+          variable_type = "categorical",
+          level = as.character(level),
+          pct = 100 * n / N,
+          mean = NA_real_,
+          sd = NA_real_,
+          median = NA_real_,
+          p25 = NA_real_,
+          p75 = NA_real_
+        )]
+        
+      } else {
+        tmp <- dt[, .(n = .N), by = v]
+        total_n <- nrow(dt)
+        
+        setnames(tmp, old = v, new = "level")
+        
+        tmp[, `:=`(
+          site = site_name,
+          group = "overall",
+          variable = v,
+          variable_type = "categorical",
+          level = as.character(level),
+          N = total_n,
+          pct = 100 * n / N,
+          mean = NA_real_,
+          sd = NA_real_,
+          median = NA_real_,
+          p25 = NA_real_,
+          p75 = NA_real_
+        )]
+      }
+      
+      tmp <- tmp[, .(
+        site, group, variable, variable_type, level,
+        n, N, pct,
+        mean, sd, median, p25, p75
+      )]
+      
+      out_list[[paste0("cat_", v)]] <- tmp
+    }
+  }
+  
+  #-----------------------------#
+  # CONTINUOUS VARIABLES
+  #-----------------------------#
+  if (!is.null(cont_vars) && length(cont_vars) > 0) {
+    for (v in cont_vars) {
+      
+      if (!is.null(by)) {
+        tmp <- dt[, .(
+          n      = sum(!is.na(get(v))),
+          N      = .N,
+          pct    = NA_real_,
+          mean   = as.numeric(if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE)),
+          sd     = as.numeric(if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE)),
+          median = as.numeric(if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE)),
+          p25    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.25, na.rm = TRUE)),
+          p75    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.75, na.rm = TRUE))
+        ), by = by]
+        
+        setnames(tmp, old = by, new = "group")
+        
+        tmp[, `:=`(
+          site = site_name,
+          variable = v,
+          variable_type = "continuous",
+          level = NA_character_
+        )]
+        
+      } else {
+        tmp <- dt[, .(
+          n      = sum(!is.na(get(v))),
+          N      = .N,
+          pct    = NA_real_,
+          mean   = as.numeric(if (all(is.na(get(v)))) NA_real_ else mean(get(v), na.rm = TRUE)),
+          sd     = as.numeric(if (sum(!is.na(get(v))) <= 1) NA_real_ else sd(get(v), na.rm = TRUE)),
+          median = as.numeric(if (all(is.na(get(v)))) NA_real_ else median(get(v), na.rm = TRUE)),
+          p25    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.25, na.rm = TRUE)),
+          p75    = as.numeric(if (all(is.na(get(v)))) NA_real_ else quantile(get(v), 0.75, na.rm = TRUE))
+        )]
+        
+        tmp[, `:=`(
+          site = site_name,
+          group = "overall",
+          variable = v,
+          variable_type = "continuous",
+          level = NA_character_
+        )]
+      }
+      
+      tmp <- tmp[, .(
+        site, group, variable, variable_type, level,
+        n, N, pct,
+        mean, sd, median, p25, p75
+      )]
+      
+      out_list[[paste0("cont_", v)]] <- tmp
+    }
+  }
+  
+  out <- rbindlist(out_list, fill = TRUE, use.names = TRUE)
+  
+  setcolorder(out, c(
+    "site", "group", "variable", "variable_type", "level",
+    "n", "N", "pct", "mean", "sd", "median", "p25", "p75"
+  ))
+  
+  #-----------------------------#
+  # CENSORING
+  #-----------------------------#
+  out[variable_type == "categorical" & n < 10,
+      `:=`(pct = NA_real_)]
+  out[variable_type == "categorical",
+      n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
+  out[variable_type == "categorical" & n < 10,
+    `:=`(n = NA_real_, N = NA_real_)]
+  
+  out[variable_type == "continuous" & n < 10,
+      `:=`(mean = NA_real_, sd = NA_real_, median = NA_real_,
+           p25 = NA_real_, p75 = NA_real_)]
+  out[variable_type == "continuous",
+      n_censored := ifelse(!is.na(n) & n < 10, "<10", as.character(n))]
+  out[variable_type == "continuous" & n < 10,
+    `:=`(n = NA_real_, N = NA_real_)] 
+
+  #-----------------------------#
+  # COMPLEMENTARY SUPPRESSION
+  #-----------------------------#
+  cat_out <- out[variable_type == "categorical"]
+  if (nrow(cat_out) > 0) {
+    suppressed_combos <- unique(cat_out[
+      n_censored == "<10",
+      .(variable, group)
+    ])
+    
+    if (nrow(suppressed_combos) > 0) {
+      suppressed_combos[, suppress_flag := TRUE]
+      out <- merge(out, suppressed_combos, by = c("variable", "group"), all.x = TRUE)
+      
+      out[variable_type == "categorical" & !is.na(suppress_flag),
+          `:=`(
+            pct        = NA_real_,
+            N          = NA_real_,
+            n_censored = ifelse(n_censored == "<10", "<10", "suppressed"),
+            n          = NA_real_
+          )]
+      
+      out[, suppress_flag := NULL]
+    }
+  }
+
+  cont_out <- out[variable_type == "continuous"]
+  if (nrow(cont_out) > 0) {
+    suppressed_cont_vars <- cont_out[
+      n_censored == "<10",
+      unique(variable)
+    ]
+    
+    if (length(suppressed_cont_vars) > 0) {
+      out[variable_type == "continuous" & variable %in% suppressed_cont_vars,
+          `:=`(
+            mean       = NA_real_,
+            sd         = NA_real_,
+            median     = NA_real_,
+            p25        = NA_real_,
+            p75        = NA_real_,
+            N          = NA_real_,
+            n_censored = ifelse(n_censored == "<10", "<10", "suppressed"),
+            n          = NA_real_
+          )]
+    }
+  }
+  
+  return(out[])
+}
+
+make_table1_comparisons <- function(dt, by, cont_vars = NULL, cat_vars = NULL,
+                                    site_name = NA_character_, group_levels = NULL,
+                                    reference_level = NULL, fisher_if_expected_lt5 = TRUE) {
+  dt <- as.data.table(copy(dt))
+  
+  if (!(by %in% names(dt))) stop(sprintf("Grouping variable '%s' not found in dt.", by))
+  dt <- dt[!is.na(get(by))]
+  dt[, (by) := as.character(get(by))]
+  
+  observed_groups <- unique(dt[[by]])
+  observed_groups <- observed_groups[!is.na(observed_groups)]
+  
+  if (!is.null(reference_level)) {
+    if (!reference_level %in% observed_groups)
+      stop(sprintf("reference_level '%s' not found in data.", reference_level))
+    ref <- reference_level
+    comparators <- if (!is.null(group_levels)) group_levels[group_levels != ref] else sort(observed_groups[observed_groups != ref])
+  } else {
+    if (!is.null(group_levels)) {
+      if (length(group_levels) != 2) stop("group_levels must have length 2.")
+      ref <- group_levels[1]; comparators <- group_levels[2]
+    } else {
+      if (length(observed_groups) != 2)
+        stop(sprintf("Found %s groups — supply reference_level for 3+ groups.", paste(observed_groups, collapse = ", ")))
+      grps <- sort(observed_groups); ref <- grps[1]; comparators <- grps[2]
+    }
+  }
+
+  #--------------------------------------------------#
+  # Helper: multilevel categorical SMD
+  #--------------------------------------------------#
+  calc_multilevel_smd <- function(x, group, g1, g2) {
+    dsub <- data.table(x = as.character(x), group = as.character(group))
+    dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
+    dsub[is.na(x), x := "missing"]
+    levs <- sort(unique(dsub$x))
+    if (length(levs) < 2) return(list(smd = NA_real_, smd_se = NA_real_))
+    ref_lev <- levs[1]
+    keep_levs <- levs[levs != ref_lev]
+    make_indicator_matrix <- function(vals, levels_keep) {
+      out <- sapply(levels_keep, function(lv) as.numeric(vals == lv))
+      if (is.null(dim(out))) { out <- matrix(out, ncol = 1); colnames(out) <- levels_keep }
+      out
+    }
+    x1 <- dsub[group == g1, x]; x2 <- dsub[group == g2, x]
+    n1 <- length(x1); n2 <- length(x2)
+    if (n1 < 2 || n2 < 2) return(list(smd = NA_real_, smd_se = NA_real_))
+    M1 <- make_indicator_matrix(x1, keep_levs)
+    M2 <- make_indicator_matrix(x2, keep_levs)
+    p1 <- colMeans(M1); p2 <- colMeans(M2); d <- p2 - p1
+    S1 <- stats::cov(M1); S2 <- stats::cov(M2)
+    if (is.null(dim(S1))) S1 <- matrix(S1, nrow = 1, ncol = 1)
+    if (is.null(dim(S2))) S2 <- matrix(S2, nrow = 1, ncol = 1)
+    S_pooled <- (S1 + S2) / 2
+    S_inv <- try(solve(S_pooled), silent = TRUE)
+    if (inherits(S_inv, "try-error")) {
+      if (!requireNamespace("MASS", quietly = TRUE)) return(list(smd = NA_real_, smd_se = NA_real_))
+      S_inv <- try(MASS::ginv(S_pooled), silent = TRUE)
+      if (inherits(S_inv, "try-error")) return(list(smd = NA_real_, smd_se = NA_real_))
+    }
+    smd_val <- as.numeric(sqrt(t(d) %*% S_inv %*% d))
+    # Yang & Dalton (2012) variance approximation for multivariate SMD:
+    #   Var(d_M) ≈ (n1+n2)/(n1*n2) * k + d_M^2 / (2*(n1+n2))
+    # where k is the number of non-reference categories.
+    k <- length(keep_levs)
+    smd_se_val <- sqrt((n1 + n2) / (n1 * n2) * k + smd_val^2 / (2 * (n1 + n2)))
+    list(smd = smd_val, smd_se = smd_se_val)
+  }
+
+  #--------------------------------------------------#
+  # Helper: continuous variable comparison
+  #--------------------------------------------------#
+  compare_continuous <- function(x, group, var_name, g1, g2, comparison_label) {
+    dsub <- data.table(x = x, group = group)
+    dsub <- dsub[!is.na(group)]
+    
+    x1 <- dsub[group == g1, x]
+    x2 <- dsub[group == g2, x]
+    x1_nonmiss <- x1[!is.na(x1)]
+    x2_nonmiss <- x2[!is.na(x2)]
+    
+    n1 <- length(x1_nonmiss); n2 <- length(x2_nonmiss)
+    mean1 <- if (n1 > 0) mean(x1_nonmiss) else NA_real_
+    mean2 <- if (n2 > 0) mean(x2_nonmiss) else NA_real_
+    sd1   <- if (n1 > 1) sd(x1_nonmiss) else NA_real_
+    sd2   <- if (n2 > 1) sd(x2_nonmiss) else NA_real_
+    med1  <- if (n1 > 0) median(x1_nonmiss) else NA_real_
+    med2  <- if (n2 > 0) median(x2_nonmiss) else NA_real_
+    p25_1 <- if (n1 > 0) as.numeric(quantile(x1_nonmiss, 0.25, na.rm = TRUE)) else NA_real_
+    p25_2 <- if (n2 > 0) as.numeric(quantile(x2_nonmiss, 0.25, na.rm = TRUE)) else NA_real_
+    p75_1 <- if (n1 > 0) as.numeric(quantile(x1_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
+    p75_2 <- if (n2 > 0) as.numeric(quantile(x2_nonmiss, 0.75, na.rm = TRUE)) else NA_real_
+    
+    estimate <- NA_real_; ci_lower <- NA_real_
+    ci_upper <- NA_real_; p_value  <- NA_real_
+    test_used <- NA_character_
+    
+    if (n1 >= 2 && n2 >= 2) {
+      tt <- try(t.test(x2_nonmiss, x1_nonmiss), silent = TRUE)
+      if (!inherits(tt, "try-error")) {
+        estimate  <- unname(mean2 - mean1)
+        ci_lower  <- unname(tt$conf.int[1])
+        ci_upper  <- unname(tt$conf.int[2])
+        p_value   <- tt$p.value
+        test_used <- "welch_t_test"
+      }
+    }
+    
+    pooled_sd <- NA_real_; smd <- NA_real_; smd_se <- NA_real_
+    if (n1 >= 2 && n2 >= 2 && !is.na(sd1) && !is.na(sd2)) {
+      pooled_sd <- sqrt(((n1 - 1) * sd1^2 + (n2 - 1) * sd2^2) / (n1 + n2 - 2))
+      if (!is.na(pooled_sd) && pooled_sd > 0) {
+        smd <- (mean2 - mean1) / pooled_sd
+        # Hedges large-sample SE (this is the form metafor::escalc uses)
+        smd_se <- sqrt((n1 + n2) / (n1 * n2) + smd^2 / (2 * (n1 + n2)))
+      }
+    }
+    
+    data.table(
+      site = site_name, variable = var_name, variable_type = "continuous",
+      comparison = comparison_label, level = NA_character_,
+      group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+      group1_mean = mean1, group2_mean = mean2,
+      group1_sd = sd1, group2_sd = sd2,
+      group1_median = med1, group2_median = med2,
+      group1_p25 = p25_1, group2_p25 = p25_2,
+      group1_p75 = p75_1, group2_p75 = p75_2,
+      statistic = "mean_difference", estimate = estimate,
+      ci_lower = ci_lower, ci_upper = ci_upper, p_value = p_value,
+      smd = smd, smd_se = smd_se, effect_measure = "mean_difference",
+      test = test_used, note = NA_character_
+    )
+  }
+
+  #--------------------------------------------------#
+  # Helper: categorical variable comparison
+  #--------------------------------------------------#
+  compare_categorical <- function(x, group, var_name, g1, g2, comparison_label) {
+    dsub <- data.table(x = x, group = group)
+    dsub <- dsub[!is.na(group)]
+    dsub[, x := as.character(x)]
+    dsub[is.na(x), x := "missing"]
+    
+    tab <- table(dsub$x, dsub$group)
+    needed_cols <- c(g1, g2)
+    if (!all(needed_cols %in% colnames(tab))) {
+      full_tab <- matrix(0, nrow = nrow(tab), ncol = 2,
+                         dimnames = list(rownames(tab), needed_cols))
+      common_cols <- intersect(colnames(tab), needed_cols)
+      full_tab[, common_cols] <- tab[, common_cols, drop = FALSE]
+      tab <- full_tab
+    } else {
+      tab <- tab[, needed_cols, drop = FALSE]
+    }
+    
+    n_levels <- nrow(tab)
+    n1 <- sum(tab[, g1])
+    n2 <- sum(tab[, g2])
+    
+    overall_smd_result <- calc_multilevel_smd(dsub$x, dsub$group, g1, g2)
+    overall_smd    <- overall_smd_result$smd
+    overall_smd_se <- overall_smd_result$smd_se
+    
+    p_value <- NA_real_; test_used <- NA_character_
+    if (n_levels >= 1) {
+      chisq_try <- try(chisq.test(tab, correct = FALSE), silent = TRUE)
+      if (!inherits(chisq_try, "try-error")) {
+        expected <- chisq_try$expected
+        if (fisher_if_expected_lt5 && any(expected < 5)) {
+          fisher_try <- try(fisher.test(tab), silent = TRUE)
+          if (!inherits(fisher_try, "try-error")) {
+            p_value <- fisher_try$p.value; test_used <- "fisher_exact"
+          } else {
+            p_value <- chisq_try$p.value; test_used <- "chi_square"
+          }
+        } else {
+          p_value <- chisq_try$p.value; test_used <- "chi_square"
+        }
+      }
+    }
+    
+    out <- data.table(
+      site = site_name, variable = var_name, variable_type = "categorical",
+      comparison = comparison_label, level = NA_character_,
+      group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+      group1_mean = NA_real_, group2_mean = NA_real_,
+      group1_sd = NA_real_, group2_sd = NA_real_,
+      group1_median = NA_real_, group2_median = NA_real_,
+      group1_p25 = NA_real_, group2_p25 = NA_real_,
+      group1_p75 = NA_real_, group2_p75 = NA_real_,
+      statistic = "overall_difference", estimate = NA_real_,
+      ci_lower = NA_real_, ci_upper = NA_real_, p_value = p_value,
+      smd = overall_smd, smd_se = overall_smd_se, effect_measure = "categorical_smd",
+      test = test_used, note = NA_character_
+    )
+    
+    if (n_levels == 2) {
+      levels_x <- rownames(tab)
+      ref_level <- levels_x[1]; target_level <- levels_x[2]
+      a <- as.numeric(tab[target_level, g2])
+      b <- as.numeric(tab[ref_level,   g2])
+      c <- as.numeric(tab[target_level, g1])
+      d <- as.numeric(tab[ref_level,   g1])
+      p1 <- if ((c + d) > 0) c / (c + d) else NA_real_
+      p2 <- if ((a + b) > 0) a / (a + b) else NA_real_
+      rd <- if (!is.na(p1) && !is.na(p2)) p2 - p1 else NA_real_
+      rd_se <- if (!is.na(p1) && !is.na(p2) && (c + d) > 0 && (a + b) > 0)
+        sqrt((p1 * (1 - p1) / (c + d)) + (p2 * (1 - p2) / (a + b))) else NA_real_
+      rd_lcl <- if (!is.na(rd_se)) rd - 1.96 * rd_se else NA_real_
+      rd_ucl <- if (!is.na(rd_se)) rd + 1.96 * rd_se else NA_real_
+      pooled_p <- if (!is.na(p1) && !is.na(p2)) (p1 + p2) / 2 else NA_real_
+      smd_binary <- if (!is.na(pooled_p) && pooled_p > 0 && pooled_p < 1)
+        (p2 - p1) / sqrt(pooled_p * (1 - pooled_p)) else NA_real_
+      # Hedges-style SE for the binary SMD. n1=(c+d), n2=(a+b) here.
+      n1_bin <- c + d; n2_bin <- a + b
+      smd_binary_se <- if (!is.na(smd_binary) && n1_bin > 1 && n2_bin > 1)
+        sqrt((n1_bin + n2_bin) / (n1_bin * n2_bin) +
+               smd_binary^2 / (2 * (n1_bin + n2_bin))) else NA_real_
+      
+      out_rd <- data.table(
+        site = site_name, variable = var_name, variable_type = "categorical",
+        comparison = comparison_label, level = target_level,
+        group1 = g1, group2 = g2, group1_n = n1, group2_n = n2,
+        group1_mean = p1, group2_mean = p2,
+        group1_sd = NA_real_, group2_sd = NA_real_,
+        group1_median = NA_real_, group2_median = NA_real_,
+        group1_p25 = NA_real_, group2_p25 = NA_real_,
+        group1_p75 = NA_real_, group2_p75 = NA_real_,
+        statistic = "risk_difference", estimate = rd,
+        ci_lower = rd_lcl, ci_upper = rd_ucl, p_value = p_value,
+        smd = smd_binary, smd_se = smd_binary_se, effect_measure = "risk_difference",
+        test = test_used,
+        note = sprintf("Binary categorical variable. level='%s' treated as event.", target_level)
+      )
+      out <- rbind(out, out_rd, fill = TRUE)
+      
+    } else if (n_levels > 2) {
+      out[, note := "Multi-level categorical variable: overall p-value and omnibus SMD reported; CI not populated."]
+    }
+    
+    out
+  }
+
+  #--------------------------------------------------#
+  # Loop over pairwise comparisons
+  #--------------------------------------------------#
+  all_comparisons <- lapply(comparators, function(comp) {
+    g1 <- ref
+    g2 <- comp
+    comparison_label <- paste0(by, ": ", g2, " vs ", g1)
+    dt_pair <- dt[get(by) %in% c(g1, g2)]
+    out_list <- list()
+    
+    if (!is.null(cont_vars)) {
+      for (v in cont_vars) {
+        if (!(v %in% names(dt_pair))) { warning(sprintf("'%s' not found. Skipping.", v)); next }
+        out_list[[paste0("cont_", v)]] <- compare_continuous(dt_pair[[v]], dt_pair[[by]], v, g1, g2, comparison_label)
+      }
+    }
+    
+    if (!is.null(cat_vars)) {
+      for (v in cat_vars) {
+        if (!(v %in% names(dt_pair))) { warning(sprintf("'%s' not found. Skipping.", v)); next }
+        out_list[[paste0("cat_", v)]] <- compare_categorical(dt_pair[[v]], dt_pair[[by]], v, g1, g2, comparison_label)
+      }
+    }
+    
+    rbindlist(out_list, fill = TRUE, use.names = TRUE)
+  })
+
+  out <- rbindlist(all_comparisons, fill = TRUE, use.names = TRUE)
+  
+  #-----------------------------#
+  # CENSORING
+  #-----------------------------#
+  # Add censored count columns before suppressing raw values
+  out[, group1_n_censored := ifelse(group1_n < 10, "<10", as.character(group1_n))]
+  out[, group2_n_censored := ifelse(group2_n < 10, "<10", as.character(group2_n))]
+  
+  # Suppress all statistics when either group is below threshold
+  out[group1_n < 10 | group2_n < 10,
+      `:=`(
+        estimate      = NA_real_,
+        ci_lower      = NA_real_,
+        ci_upper      = NA_real_,
+        p_value       = NA_real_,
+        smd           = NA_real_,
+        smd_se        = NA_real_,
+        group1_mean   = NA_real_,
+        group2_mean   = NA_real_,
+        group1_sd     = NA_real_,
+        group2_sd     = NA_real_,
+        group1_median = NA_real_,
+        group2_median = NA_real_,
+        group1_p25    = NA_real_,
+        group2_p25    = NA_real_,
+        group1_p75    = NA_real_,
+        group2_p75    = NA_real_,
+        note          = "Suppressed: cell size < 10"
+      )]
+  
+  # Suppress raw counts after creating censored versions
+  out[group1_n < 10, group1_n := NA_real_]
+  out[group2_n < 10, group2_n := NA_real_]
+
+  #-----------------------------#
+  # COMPLEMENTARY SUPPRESSION
+  #-----------------------------#
+  # In the comparisons table, the structure is one row per variable-comparison pair
+  # (not per level), so if either group_n is suppressed we suppress the whole
+  # variable-comparison combination, which the censoring block above already does.
+  # The additional step here suppresses variables entirely if they appear in ANY
+  # suppressed comparison, preventing back-calculation across comparisons.
+
+  suppressed_vars <- out[
+    group1_n_censored == "<10" | group2_n_censored == "<10",
+    unique(variable)
+  ]
+
+  if (length(suppressed_vars) > 0) {
+    out[variable %in% suppressed_vars,
+        `:=`(
+          estimate      = NA_real_,
+          ci_lower      = NA_real_,
+          ci_upper      = NA_real_,
+          p_value       = NA_real_,
+          smd           = NA_real_,
+          group1_mean   = NA_real_,
+          group2_mean   = NA_real_,
+          group1_sd     = NA_real_,
+          group2_sd     = NA_real_,
+          group1_median = NA_real_,
+          group2_median = NA_real_,
+          group1_p25    = NA_real_,
+          group2_p25    = NA_real_,
+          group1_p75    = NA_real_,
+          group2_p75    = NA_real_,
+          group1_n_censored = ifelse(group1_n_censored == "<10", "<10", "suppressed"),
+          group2_n_censored = ifelse(group2_n_censored == "<10", "<10", "suppressed"),
+          group1_n      = NA_real_,
+          group2_n      = NA_real_,
+          note          = ifelse(
+            is.na(note) | note == "",
+            "Suppressed: complementary cell size < 10",
+            note
+          )
+        )]
+  }
+
+  desired_order <- c(
+    "site", "variable", "variable_type", "comparison", "level",
+    "group1", "group2", "group1_n", "group1_n_censored",
+    "group2_n", "group2_n_censored",
+    "group1_mean", "group2_mean", "group1_sd", "group2_sd",
+    "group1_median", "group2_median", "group1_p25", "group2_p25",
+    "group1_p75", "group2_p75",
+    "statistic", "estimate", "ci_lower", "ci_upper",
+    "p_value", "smd", "smd_se", "effect_measure", "test", "note"
+  )
+  existing_order <- desired_order[desired_order %in% names(out)]
+  setcolorder(out, existing_order)
+  
+  return(out[])
+}
+
+################################################################################
+# Initialize a global log for skipped/failed table1s (with project column)
+################################################################################
+table1_log <- data.table(
+  project         = character(),
+  table_name      = character(),
+  cohort_name     = character(),
+  by_var          = character(),
+  table_type      = character(),
+  n_rows          = integer(),
+  n_groups        = integer(),
+  status          = character(),
+  reason          = character(),
+  output_file     = character()
+)
+
+################################################################################
+# Wrapper: descriptive table1 with safety checks and logging
+################################################################################
+make_table1_safe <- function(dt,
+                             cat_vars,
+                             cont_vars,
+                             by,
+                             site_name,
+                             output_path,
+                             table_name,
+                             cohort_name,
+                             project = NA_character_) {                    # NEW
+  
+  if (is.null(dt) || nrow(dt) == 0) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "descriptive", n_rows = 0L, n_groups = 0L,
+      status = "skipped_empty", reason = "Cohort has 0 rows",
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " table1: cohort is empty")
+    return(NULL)
+  }
+  
+  if (!by %in% names(dt)) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "descriptive", n_rows = nrow(dt), n_groups = 0L,
+      status = "failed", reason = paste0("by variable '", by, "' not in data"),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " table1: by variable '", by, "' not in data")
+    return(NULL)
+  }
+  
+  n_groups <- length(unique(dt[[by]][!is.na(dt[[by]])]))
+  if (n_groups < 1) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "descriptive", n_rows = nrow(dt), n_groups = 0L,
+      status = "skipped_empty",
+      reason = paste0("by variable '", by, "' has no non-NA values"),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " table1: by variable has no non-NA values")
+    return(NULL)
+  }
+  
+  result <- tryCatch({
+    tbl <- make_table1_federated(
+      dt = dt, cat_vars = cat_vars, cont_vars = cont_vars,
+      by = by, site_name = site_name
+    )
+    fwrite(tbl, output_path)
+    
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "descriptive", n_rows = nrow(dt), n_groups = n_groups,
+      status = "success", reason = NA_character_,
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    tbl
+    
+  }, error = function(e) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "descriptive", n_rows = nrow(dt), n_groups = n_groups,
+      status = "failed", reason = conditionMessage(e),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " table1: ", conditionMessage(e))
+    return(NULL)
+  })
+  
+  return(result)
+}
+
+################################################################################
+# Wrapper: comparison table1 with safety checks and logging
+################################################################################
+make_table1_comparisons_safe <- function(dt,
+                                         by,
+                                         reference_level,
+                                         cont_vars,
+                                         cat_vars,
+                                         site_name,
+                                         output_path,
+                                         table_name,
+                                         cohort_name,
+                                         project = NA_character_) {        # NEW
+  
+  if (is.null(dt) || nrow(dt) == 0) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = 0L, n_groups = 0L,
+      status = "skipped_empty", reason = "Cohort has 0 rows",
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " comparisons: cohort is empty")
+    return(NULL)
+  }
+  
+  if (!by %in% names(dt)) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = nrow(dt), n_groups = 0L,
+      status = "failed", reason = paste0("by variable '", by, "' not in data"),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " comparisons: by variable '", by, "' not in data")
+    return(NULL)
+  }
+  
+  observed_groups <- unique(as.character(dt[[by]]))
+  observed_groups <- observed_groups[!is.na(observed_groups)]
+  n_groups <- length(observed_groups)
+  
+  if (n_groups < 2) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = nrow(dt), n_groups = n_groups,
+      status = "skipped_empty",
+      reason = paste0("Only ", n_groups, " group(s) present; need >=2 for comparisons"),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " comparisons: only ", n_groups,
+            " group(s) in '", by, "'")
+    return(NULL)
+  }
+  
+  if (!reference_level %in% observed_groups) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = nrow(dt), n_groups = n_groups,
+      status = "skipped_empty",
+      reason = paste0("Reference level '", reference_level,
+                      "' not present in data. Observed: ",
+                      paste(observed_groups, collapse = ", ")),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " comparisons: reference level '",
+            reference_level, "' not in data")
+    return(NULL)
+  }
+  
+  result <- tryCatch({
+    tbl <- make_table1_comparisons(
+      dt = dt, by = by, reference_level = reference_level,
+      cont_vars = cont_vars, cat_vars = cat_vars, site_name = site_name
+    )
+    fwrite(tbl, output_path)
+    
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = nrow(dt), n_groups = n_groups,
+      status = "success", reason = NA_character_,
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    tbl
+    
+  }, error = function(e) {
+    log_row <- data.table(
+      project = project,                                                   # NEW
+      table_name = table_name, cohort_name = cohort_name, by_var = by,
+      table_type = "comparisons", n_rows = nrow(dt), n_groups = n_groups,
+      status = "failed", reason = conditionMessage(e),
+      output_file = output_path
+    )
+    table1_log <<- rbind(table1_log, log_row, fill = TRUE)
+    message("Skipping ", table_name, " comparisons: ", conditionMessage(e))
+    return(NULL)
+  })
+  
+  return(result)
+}
+
+################################################################################
+# Combined wrapper: build descriptive + comparison table1s in one call
+################################################################################
+make_table1_pair <- function(dt,
+                             by,
+                             reference_level,
+                             cat_vars,
+                             cont_vars,
+                             site_name,
+                             tables_dir,
+                             institution_prefix,
+                             cohort_name,
+                             file_stem,
+                             project = NA_character_) {                    # NEW
+  
+  desc_path <- file.path(tables_dir,
+                         paste0(institution_prefix, "_table1_", file_stem, "_descriptive.csv"))
+  comp_path <- file.path(tables_dir,
+                         paste0(institution_prefix, "_table1_", file_stem, "_comparisons.csv"))
+  
+  desc <- make_table1_safe(
+    dt = dt, cat_vars = cat_vars, cont_vars = cont_vars, by = by,
+    site_name = site_name, output_path = desc_path,
+    table_name = paste0(file_stem, "_descriptive"),
+    cohort_name = cohort_name,
+    project = project                                                      # NEW
+  )
+  
+  comp <- make_table1_comparisons_safe(
+    dt = dt, by = by, reference_level = reference_level,
+    cont_vars = cont_vars, cat_vars = cat_vars, site_name = site_name,
+    output_path = comp_path,
+    table_name = paste0(file_stem, "_comparisons"),
+    cohort_name = cohort_name,
+    project = project                                                      # NEW
+  )
+  
+  invisible(list(descriptive = desc, comparisons = comp))
+}
+```
+
+# Function to Run LM and GLM Models
+```{r}
+################################################################################
+# Marginal standardization (g-computation) for binary GLM outcomes
+# Returns marginal predicted probabilities under each exposure level and
+# their difference (risk difference) with bootstrap CI.
+# This is the correct estimand for meta-analyzing binary outcomes across sites.
+################################################################################
+extract_glm_marginal <- function(model,
+                                 data,
+                                 exposure      = "lang_cat_6",
+                                 ref_level     = "english",
+                                 target_level  = "spanish",
+                                 n_boot        = 500,
+                                 seed          = 42,
+                                 site_name     = NA_character_,
+                                 model_name    = NA_character_,
+                                 cohort_name   = NA_character_) {
+  
+  data_used <- as.data.table(copy(data))
+  
+  if (!exposure %in% names(data_used)) {
+    warning("Exposure variable '", exposure, "' not found in data. Returning NULL.")
+    return(NULL)
+  }
+  
+  original_levels <- levels(data_used[[exposure]])
+  if (is.null(original_levels)) {
+    original_levels <- sort(unique(data_used[[exposure]]))
+  }
+  
+  # Extract the model formula and family so we can refit on each bootstrap sample
+  model_formula <- formula(model)
+  model_family  <- family(model)
+  model_weights <- model$prior.weights  # NULL for unweighted models
+  
+  # ---- Core marginal standardization on any dataset + fitted model ----------
+  marginal_rd_from_model <- function(fit, dat) {
+    dat_target <- copy(dat)
+    dat_ref    <- copy(dat)
+    dat_target[[exposure]] <- factor(target_level, levels = original_levels)
+    dat_ref[[exposure]]    <- factor(ref_level,    levels = original_levels)
+    p_target <- mean(predict(fit, newdata = dat_target, type = "response"), na.rm = TRUE)
+    p_ref    <- mean(predict(fit, newdata = dat_ref,    type = "response"), na.rm = TRUE)
+    list(p_target = p_target, p_ref = p_ref, rd = p_target - p_ref)
+  }
+  
+  # ---- Point estimate using original model ----------------------------------
+  point_est <- marginal_rd_from_model(model, data_used)
+  
+  # ---- Bootstrap: refit model on each resample then standardize -------------
+  set.seed(seed)
+  n <- nrow(data_used)
+  
+  boot_rds <- vapply(seq_len(n_boot), function(i) {
+    boot_idx <- sample(n, n, replace = TRUE)
+    boot_dat <- data_used[boot_idx]
+    
+    # Refit the model on the bootstrap resample
+    boot_fit <- tryCatch({
+      if (is.null(model_weights)) {
+        do.call(glm, list(formula = model_formula, data = boot_dat,
+                          family = model_family))
+      } else {
+        do.call(glm, list(formula = model_formula, data = boot_dat,
+                          family = model_family,
+                          weights = model_weights[boot_idx]))
+      }
+    }, error = function(e) NULL)
+    
+    if (is.null(boot_fit)) return(NA_real_)
+    
+    # Standardize using the bootstrap-fitted model over the bootstrap sample
+    tryCatch(
+      marginal_rd_from_model(boot_fit, boot_dat)$rd,
+      error = function(e) NA_real_
+    )
+  }, numeric(1))
+  
+  n_failed <- sum(is.na(boot_rds))
+  if (n_failed > n_boot * 0.05) {
+    warning(sprintf(
+      "extract_glm_marginal: %d of %d bootstrap iterations failed (%.1f%%).",
+      n_failed, n_boot, 100 * n_failed / n_boot
+    ))
+  }
+  
+  boot_rds <- boot_rds[!is.na(boot_rds)]
+  boot_se  <- sd(boot_rds)
+  boot_ci  <- quantile(boot_rds, c(0.025, 0.975), na.rm = TRUE)
+  
+  data.table(
+    site             = site_name,
+    model_name       = model_name,
+    cohort_name      = cohort_name,
+    exposure         = exposure,
+    reference_level  = ref_level,
+    target_level     = target_level,
+    n_obs            = n,
+    n_boot_attempted = n_boot,
+    n_boot_succeeded = length(boot_rds),
+    p_ref            = point_est$p_ref,
+    p_target         = point_est$p_target,
+    risk_difference  = point_est$rd,
+    rd_se            = boot_se,
+    rd_ci_lower      = unname(boot_ci[1]),
+    rd_ci_upper      = unname(boot_ci[2]),
+    rd_variance      = boot_se^2
+  )
+}
+################################################################################
+# Updated extract_glm_results — keeps the original OR output for internal
+# use but adds a flag so callers know to use marginal results for publication
+################################################################################
+extract_glm_results <- function(model) {
+  coef_table <- summary(model)$coefficients
+  odds_ratios <- exp(coef_table[, "Estimate"])
+  data.frame(
+    Variable   = rownames(coef_table),
+    Odds_Ratio = odds_ratios,
+    Std_Error  = coef_table[, "Std. Error"],
+    Variance   = coef_table[, "Std. Error"]^2,
+    P_Value    = coef_table[, "Pr(>|z|)"]
+  )
+}
+
+################################################################################
+# extract_lm_results — unchanged
+################################################################################
+extract_lm_results <- function(model) {
+  coef_table <- summary(model)$coefficients
+  data.frame(
+    term      = rownames(coef_table),
+    estimate  = coef_table[, "Estimate"],
+    std.error = coef_table[, "Std. Error"],
+    variance  = coef_table[, "Std. Error"]^2,
+    p.value   = coef_table[, "Pr(>|t|)"]
+  )
+}
+################################################################################
+# Initialize a global log for dropped terms (with project column)
+################################################################################
+model_dropped_terms_log <- data.table(
+  project           = character(),
+  model_name        = character(),
+  outcome           = character(),
+  cohort_name       = character(),
+  n_obs             = integer(),
+  exposure          = character(),
+  dropped_terms     = character(),
+  dropped_reason    = character(),
+  exposure_dropped  = logical(),
+  model_skipped     = logical(),
+  error_message     = character()
+)
+
+################################################################################
+# Helper: count non-NA unique levels of a variable
+################################################################################
+n_levels_nonNA <- function(x) length(unique(x[!is.na(x)]))
+
+################################################################################
+# Helper: extract the variable name from a term like "factor(hospital_icu_id)"
+# or "race_category" or "lang_cat_6 * race_category"
+################################################################################
+extract_var_names <- function(term) {
+  # Handle factor() wrapper
+  cleaned <- gsub("factor\\(([^)]+)\\)", "\\1", term)
+  # Handle interactions (split on *, :, and trim)
+  parts <- unlist(strsplit(cleaned, "\\s*[\\*:]\\s*"))
+  trimws(parts)
+}
+
+################################################################################
+# Main wrapper: fit a model, dropping zero-variance covariates as needed
+################################################################################
+fit_model_safe <- function(outcome,
+                           exposure = NULL,
+                           covariates,
+                           data,
+                           model_name,
+                           cohort_name,
+                           project    = NA_character_,   # NEW
+                           family     = NULL,
+                           weights    = NULL,
+                           min_levels = 2) {
+  
+  # Step 1: identify which covariates have insufficient variance
+  drop <- character(0)
+  drop_reasons <- character(0)
+  
+  for (term in covariates) {
+    vars <- extract_var_names(term)
+    for (v in vars) {
+      if (!v %in% names(data)) {
+        drop <- c(drop, term)
+        drop_reasons <- c(drop_reasons, paste0(term, ": variable not in data"))
+        break
+      }
+      if (n_levels_nonNA(data[[v]]) < min_levels) {
+        drop <- c(drop, term)
+        drop_reasons <- c(drop_reasons,
+                          paste0(term, ": <", min_levels, " unique non-NA levels"))
+        break
+      }
+    }
+  }
+  drop <- unique(drop)
+  
+  # Step 2: check the exposure itself (if one was provided)
+  exposure_dropped <- FALSE
+  if (!is.null(exposure)) {
+    exposure_vars <- extract_var_names(exposure)
+    for (v in exposure_vars) {
+      if (!v %in% names(data) || n_levels_nonNA(data[[v]]) < min_levels) {
+        exposure_dropped <- TRUE
+        break
+      }
+    }
+  }
+  
+  # Step 3: if exposure was provided but is degenerate, log and skip
+  if (exposure_dropped) {
+    log_row <- data.table(
+      project          = project,
+      model_name       = model_name,
+      outcome          = outcome,
+      cohort_name      = cohort_name,
+      n_obs            = nrow(data),
+      exposure         = if (is.null(exposure)) NA_character_ else exposure,
+      dropped_terms    = paste(drop, collapse = "; "),
+      dropped_reason   = paste(drop_reasons, collapse = "; "),
+      exposure_dropped = TRUE,
+      model_skipped    = TRUE,
+      error_message    = paste0("Exposure '", exposure, "' has <", min_levels, " levels")
+    )
+    model_dropped_terms_log <<- rbind(model_dropped_terms_log, log_row, fill = TRUE)
+    message("Skipping ", model_name, " model: exposure '", exposure,
+            "' has <", min_levels, " levels")
+    return(NULL)
+  }
+  
+  # Step 4: build formula. If no exposure was provided, use covariates only.
+  rhs <- if (is.null(exposure)) {
+    setdiff(covariates, drop)
+  } else {
+    c(exposure, setdiff(covariates, drop))
+  }
+  
+  if (length(rhs) == 0) {
+    message("Skipping ", model_name, " model: no surviving terms")
+    return(NULL)
+  }
+  
+  fml <- reformulate(rhs, response = outcome)
+  
+  if (length(drop) > 0) {
+    message(model_name, ": dropping ", length(drop), " term(s): ",
+            paste(drop, collapse = ", "))
+  }
+  
+  # Step 5: fit
+  fit_result <- tryCatch({
+    if (is.null(family)) {
+      if (is.null(weights)) {
+        lm(fml, data = data)
+      } else {
+        lm(fml, data = data, weights = weights)
+      }
+    } else {
+      # Use do.call so the family argument is evaluated immediately and stored
+      # as a concrete object in the model. Without this, pscl::pR2() and other
+      # downstream functions can't recover the family later.
+      if (is.null(weights)) {
+        do.call(glm, list(formula = fml, data = data, family = family))
+      } else {
+        do.call(glm, list(formula = fml, data = data, family = family, weights = weights))
+      }
+    }
+  }, error = function(e) {
+    log_row <- data.table(
+      project          = project,                                          # NEW
+      model_name       = model_name,
+      outcome          = outcome,
+      cohort_name      = cohort_name,
+      n_obs            = nrow(data),
+      exposure = if (is.null(exposure)) NA_character_ else exposure,
+      dropped_terms    = paste(drop, collapse = "; "),
+      dropped_reason   = paste(drop_reasons, collapse = "; "),
+      exposure_dropped = FALSE,
+      model_skipped    = TRUE,
+      error_message    = conditionMessage(e)
+    )
+    model_dropped_terms_log <<- rbind(model_dropped_terms_log, log_row, fill = TRUE)
+    message("Skipping ", model_name, " model: ", conditionMessage(e))
+    return(NULL)
+  })
+  
+  # Step 6: log success
+  if (!is.null(fit_result)) {
+    log_row <- data.table(
+      project          = project,
+      model_name       = model_name,
+      outcome          = outcome,
+      cohort_name      = cohort_name,
+      n_obs            = nrow(data),
+      exposure         = if (is.null(exposure)) NA_character_ else exposure,   # CHANGED
+      dropped_terms    = if (length(drop) > 0) paste(drop, collapse = "; ") else NA_character_,
+      dropped_reason   = if (length(drop_reasons) > 0) paste(drop_reasons, collapse = "; ") else NA_character_,
+      exposure_dropped = FALSE,
+      model_skipped    = FALSE,
+      error_message    = NA_character_
+    )
+    model_dropped_terms_log <<- rbind(model_dropped_terms_log, log_row, fill = TRUE)
+  }
+  
+  return(fit_result)
+}
+
+################################################################################
+# Standard covariate sets for models
+# Defined once so changes to the adjustment set propagate everywhere.
+################################################################################
+standard_covariates <- c(
+  "race_category", "age_category", "sex_category", "bmi",
+  "factor(hospital_icu_id)", "elixhauser_score", "SVM_SCORE",
+  "laps2", "factor(observation_year)"
+)
+
+# For paralytic project models, which omit SVM_SCORE
+paralytic_covariates <- c(
+  "race_category", "ethnicity_category_final", "age_category", "bmi",
+  "sex_category", "factor(hospital_icu_id)", "elixhauser_score",
+  "laps2", "factor(observation_year)"
+)
+
+# For measurements project models, which use a different set
+measurements_covariates <- c(
+  "race_category", "age_category", "sex_category", "ethnicity_category_final",
+  "bmi", "factor(hospital_icu_id)", "elixhauser_score", "laps2",
+  "location_of_intubation", "time_from_begin_imv_to_icu_hours",
+  "factor(observation_year)"
+)
+
+# For exploratory analyses in sedation project
+exploratory_binary_covariates <- c(
+  "race_category", "age_category", "sex_category", "bmi",
+  "factor(icu_imv)", "elixhauser_score", "SVM_SCORE", "laps2",
+  "factor(observation_year)"
+)
+```
+
+
+# Build Language Categorizations
+```{r}
+# 1: English v Non-English
+total_cohort[, lang_cat_1 := fifelse(
+  language_category == "english", "english",
+  fifelse(!is.na(language_category), "non-english", NA_character_)
+)]
+
+# 2: English v Spanish v all other non-English
+total_cohort[, lang_cat_2 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  !is.na(language_category), "other non-english",
+  default = NA_character_
+)]
+
+# 3: English v Spanish v third most frequent hospital system wide language - all others NA
+# Define third_lang
+third_lang <- language_data[
+  !trimws(tolower(language_category)) %in% c("english", "spanish", "unknown or na"),
+  language_category
+][1]
+
+# Standardize the level name for cross-site pooling
+third_lang_label <- "third_lang_cat"
+
+# Define the variable
+total_cohort[, lang_cat_3 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category == third_lang, third_lang_label,    # <-- use label instead of third_lang
+  default = NA_character_
+)]
+
+third_lang_crosswalk <- data.table(
+  institution        = institution,
+  third_lang_cat     = third_lang
+)
+fwrite(third_lang_crosswalk,
+       file.path(cohort_characteristics, 
+                 paste0(institution, "_third_lang_crosswalk.csv")))
+
+# 4: English v Spanish v Chinese v Vietnamese (three non-English languages with the most evidence supporting the existence of health disparities) - all others NA
+total_cohort[, lang_cat_4 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category == "chinese", "chinese",
+  language_category == "vietnamese", "vietnamese",
+  default = NA_character_
+)]
+
+# 5: English v Spanish v Broad Regional Groupings
+# South Asian, East Asian, Southeast Asian, Sub-Saharan African, non-colonial European
+# Others that do not fit are NA
+
+# -----------------------------
+# Define language groupings
+# -----------------------------
+
+south_asian_langs <- c(
+  "gujarati",
+  "hindi",
+  "urdu",
+  "punjabi",
+  "bengali",
+  "nepali, marathi, or other indic languages",
+  "telugu",
+  "tamil",
+  "malayalam, kannada, or other dravidian languages"
+)
+
+east_asian_langs <- c(
+  "chinese",
+  "japanese",
+  "korean"
+)
+
+southeast_asian_langs <- c(
+  "vietnamese",
+  "khmer",
+  "thai, lao, or other tai-kadai languages"
+)
+
+other_asian_langs <- c(
+  "other languages of asia",
+  "tagalog",
+  "ilocano, samoan, hawaiian, or other austronesian languages"
+)
+
+sub_saharan_african_langs <- c(
+  "amharic, somali, or other afro-asiatic languages",
+  "yoruba, twi, igbo, or other languages of western africa",
+  "swahili or other languages of central, eastern, and southern africa"
+)
+
+continental_european_langs <- c(
+  "german",
+  "greek",
+  "russian",
+  "polish",
+  "italian",
+  "serbo-croatian",
+  "ukrainian or other slavic languages",
+  "yiddish, pennsylvania dutch, or other west germanic languages",
+  "other european indo-european languages")
+  
+mena_langs <- c(
+  "arabic",
+  "persian",
+  "hebrew",
+  "armenian"
+)
+
+all_other_langs <- c(
+  "french",
+  "haitian creole",
+  "portuguese",
+  "other asian indo-european languages",
+  "navajo",
+  "other native languages of north america",
+  "other and unspecified languages"
+)
+
+total_cohort[, lang_cat_5 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category %in% south_asian_langs, "south_asian",
+  language_category %in% east_asian_langs, "east_asian",
+  language_category %in% southeast_asian_langs, "southeast_asian",
+  language_category %in% continental_european_langs, "continental_european_langs",
+  language_category %in% mena_langs, "mena",
+  default = NA_character_
+)]
+
+# 6: English v Spanish - all others NA
+total_cohort[, lang_cat_6 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  default = NA_character_
+)]
+
+# Broad Regional without "other_asian" and "all_other_langs" groups?
+total_cohort[, lang_cat_7 := fcase(
+  language_category == "english", "english",
+  language_category == "spanish", "spanish",
+  language_category %in% south_asian_langs, "south_asian",
+  language_category %in% east_asian_langs, "east_asian",
+  language_category %in% southeast_asian_langs, "southeast_asian",
+  language_category %in% other_asian_langs, "other_asian",
+  language_category %in% sub_saharan_african_langs, "sub_saharan_african",
+  language_category %in% continental_european_langs, "continental_european_langs",
+  language_category %in% mena_langs, "mena",
+  language_category %in% all_other_langs, "all_other_langs",
+  default = NA_character_
+)]
+
+```
+
+#IPW Calculation for 48-hours of observation
+```{r}
+################################################################################
+# IPW Calculation for 48-hours of observation
+################################################################################
+ipw_outcome <- total_cohort[, .(
+  reached_48h = as.integer(imv_duration_hours_final >= 48)
+), by = hospitalization_id]
+
+ipw_sensitivity_analysis <- merge(total_cohort, ipw_outcome, by = "hospitalization_id")
+
+ipw_model <- glm(
+  reached_48h ~ age_category + sex_category + race_category +
+    ethnicity_category + laps2 + factor(hospital_icu_id) +
+    elixhauser_score + factor(observation_year),
+  data   = unique(ipw_sensitivity_analysis, by = "hospitalization_id"),
+  family = binomial()
+)
+
+total_cohort[, prob_reach_48h := predict(ipw_model, newdata = total_cohort, type = "response")]
+total_cohort[, ipw := 1 / prob_reach_48h]
+
+# ---- IPW Model Diagnostics --------------------------------------------------
+tryCatch({
+  model_data <- unique(ipw_sensitivity_analysis, by = "hospitalization_id")
+  model_data[, predicted_prob := predict(ipw_model, newdata = model_data, type = "response")]
+
+  # C-statistic (AUC)
+  roc_obj <- pROC::roc(model_data$reached_48h, model_data$predicted_prob, quiet = TRUE)
+  c_stat  <- as.numeric(pROC::auc(roc_obj))
+  roc_ci  <- as.numeric(pROC::ci.auc(roc_obj))
+
+  # Hosmer-Lemeshow
+  hl_test <- ResourceSelection::hoslem.test(
+    model_data$reached_48h, model_data$predicted_prob, g = 10
+  )
+
+  # Event rate overall and by language group
+  event_overall <- model_data[, .(
+    n               = .N,
+    n_reached_48h   = sum(reached_48h),
+    pct_reached_48h = 100 * mean(reached_48h)
+  )]
+
+  event_by_lang <- model_data[!is.na(lang_cat_6), .(
+    n               = .N,
+    n_reached_48h   = sum(reached_48h),
+    pct_reached_48h = 100 * mean(reached_48h)
+  ), by = lang_cat_6]
+
+  # Predicted probability distribution overall and by language group
+  prob_overall <- model_data[, .(
+    group         = "overall",
+    mean_prob     = mean(predicted_prob),
+    median_prob   = median(predicted_prob),
+    sd_prob       = sd(predicted_prob),
+    min_prob      = min(predicted_prob),
+    max_prob      = max(predicted_prob),
+    p1_prob       = quantile(predicted_prob, 0.01),
+    p99_prob      = quantile(predicted_prob, 0.99),
+    n_near_zero   = sum(predicted_prob < 0.05),
+    pct_near_zero = 100 * mean(predicted_prob < 0.05)
+  )]
+
+  prob_by_lang <- model_data[!is.na(lang_cat_6), .(
+    mean_prob     = mean(predicted_prob),
+    median_prob   = median(predicted_prob),
+    sd_prob       = sd(predicted_prob),
+    min_prob      = min(predicted_prob),
+    max_prob      = max(predicted_prob),
+    p1_prob       = quantile(predicted_prob, 0.01),
+    p99_prob      = quantile(predicted_prob, 0.99),
+    n_near_zero   = sum(predicted_prob < 0.05),
+    pct_near_zero = 100 * mean(predicted_prob < 0.05)
+  ), by = lang_cat_6]
+  setnames(prob_by_lang, "lang_cat_6", "group")
+
+  prob_diagnostics <- rbind(prob_overall, prob_by_lang, fill = TRUE)
+  prob_diagnostics[, site   := institution]
+  prob_diagnostics[, cohort := "full_48hr_cohort"]
+
+  # Compile model-level summary
+  ipw_model_diagnostics <- data.table(
+    site            = institution,
+    cohort          = "full_48hr_cohort",
+    n_total         = event_overall$n,
+    n_reached_48h   = event_overall$n_reached_48h,
+    pct_reached_48h = event_overall$pct_reached_48h,
+    c_statistic     = c_stat,
+    c_stat_ci_lb    = roc_ci[1],
+    c_stat_ci_ub    = roc_ci[3],
+    hl_chisq        = hl_test$statistic,
+    hl_df           = hl_test$parameter,
+    hl_pvalue       = hl_test$p.value,
+    weight_type     = "unstabilized",
+    weight_note     = "Stabilized weights not used due to instability at smaller federated sites"
+  )
+
+  event_by_lang[, site   := institution]
+  event_by_lang[, cohort := "full_48hr_cohort"]
+
+  fwrite(ipw_model_diagnostics,
+         file.path(rerun_tables_dir,
+                   paste0(institution, "_ipw_model_diagnostics_full_48hr.csv")))
+  fwrite(prob_diagnostics,
+         file.path(rerun_tables_dir,
+                   paste0(institution, "_ipw_predicted_prob_diagnostics_full_48hr.csv")))
+  fwrite(event_by_lang,
+         file.path(rerun_tables_dir,
+                   paste0(institution, "_ipw_event_rate_by_lang_full_48hr.csv")))
+
+  message("IPW model diagnostics written for full_48hr_cohort")
+  message(sprintf("  C-statistic: %.3f (%.3f - %.3f)", c_stat, roc_ci[1], roc_ci[3]))
+  message(sprintf("  Hosmer-Lemeshow p-value: %.3f", hl_test$p.value))
+  message(sprintf("  Predicted prob near zero (<0.05): %d (%.1f%%)",
+                  prob_overall$n_near_zero, prob_overall$pct_near_zero))
+
+}, error = function(e) {
+  message("Skipping IPW model diagnostics: ", conditionMessage(e))
+})
+```
+
+
+#Define Primary Cohort
+```{r}
+current_project <- "sedation"
+primary_cohort_all_icus <- total_cohort[!is.na(lang_cat_6)]
+
+################################################################################
+# Define Primary Cohort
+################################################################################
+spanish_counts <- primary_cohort_all_icus[lang_cat_6 == "spanish", .N, by = hospital_icu_id]
+all_hospitals <- unique(primary_cohort_all_icus$hospital_icu_id)
+hospitals_with_spanish <- spanish_counts$hospital_icu_id
+hospitals_to_remove <- setdiff(all_hospitals, hospitals_with_spanish)
+primary_cohort <- primary_cohort_all_icus[!hospital_icu_id %in% hospitals_to_remove]
+
+primary_cohort$language_category       <- relevel(as.factor(primary_cohort$language_category),       ref = "english")
+primary_cohort$lang_cat_1              <- relevel(as.factor(primary_cohort$lang_cat_1),              ref = "english")
+primary_cohort$lang_cat_2              <- relevel(as.factor(primary_cohort$lang_cat_2),              ref = "english")
+primary_cohort$lang_cat_3              <- relevel(as.factor(primary_cohort$lang_cat_3),              ref = "english")
+primary_cohort$lang_cat_4              <- relevel(as.factor(primary_cohort$lang_cat_4),              ref = "english")
+primary_cohort$lang_cat_5              <- relevel(as.factor(primary_cohort$lang_cat_5),              ref = "english")
+primary_cohort$lang_cat_6              <- relevel(as.factor(primary_cohort$lang_cat_6),              ref = "english")
+primary_cohort$sex_category            <- relevel(as.factor(primary_cohort$sex_category),            ref = "male")
+primary_cohort$race_category           <- relevel(as.factor(primary_cohort$race_category),           ref = "white")
+primary_cohort$ethnicity_category      <- relevel(as.factor(primary_cohort$ethnicity_category),      ref = "non-hispanic")
+#primary_cohort$ethnicity_category_final <- relevel(as.factor(primary_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+primary_cohort$continuous_nmba_48      <- relevel(as.factor(primary_cohort$continuous_nmba_48),      ref = "0")
+primary_cohort$icu_imv <- relevel(as.factor(primary_cohort$icu_imv), ref = "medical_icu")
+
+################################################################################
+# Primary Cohort - Table 1s
+################################################################################
+make_table1_pair(
+  dt = primary_cohort, by = "lang_cat_6", reference_level = "english",
+  cat_vars = cat_vars, cont_vars = cont_vars, site_name = institution,
+  tables_dir = rerun_tables_dir, institution_prefix = institution,
+  cohort_name = "primary_cohort", file_stem = "rerun",
+  project     = current_project
+)
+```
+
+#IPW Diagnostics
+```{r}
+# Helper for the cohort-filtering subgroup pattern. Each subgroup needs:
+#   1. Filter the primary cohort
+#   2. Re-level factors (subset can change which levels are present)
+#   3. Build descriptive + comparison table1s
+#   4. Fit the standard sedation model
+#   5. Write model output if it succeeded
+relevel_subgroup <- function(dt) {
+  if (is.null(dt) || nrow(dt) == 0) return(dt)
+  dt$lang_cat_6   <- relevel(as.factor(dt$lang_cat_6),   ref = "english")
+  dt$sex_category <- relevel(as.factor(dt$sex_category), ref = "male")
+  dt$race_category <- relevel(as.factor(dt$race_category), ref = "white")
+  dt$ethnicity_category <- relevel(as.factor(dt$ethnicity_category), ref = "non-hispanic")
+  dt$ethnicity_category_final <- relevel(as.factor(dt$ethnicity_category_final), ref = "non-hispanic/unknown")
+  dt
+}
+
+cat_vars <- c("sex_category", "race_category", "ethnicity_category", "age_category")
+
+cont_vars <- c("laps2", "elixhauser_score")
+
+################################################################################
+# Full 48 Hours - IPW Weighted with Sandwich SEs
+################################################################################
+full_48hr_cohort <- primary_cohort[hours_mechanically_ventilated_72 >= 48]
+full_48hr_cohort <- full_48hr_cohort[is.finite(ipw) & !is.na(ipw)]
+
+# Track pre-winsorization N
+n_pretrim <- nrow(full_48hr_cohort)
+
+ipw_q <- quantile(full_48hr_cohort$ipw, c(0.01, 0.99), na.rm = TRUE)
+full_48hr_cohort[, ipw := pmin(pmax(ipw, ipw_q[1]), ipw_q[2])]
+
+full_48hr_cohort <- relevel_subgroup(full_48hr_cohort)
+
+make_table1_pair(
+  dt = full_48hr_cohort, by = "lang_cat_6", reference_level = "english",
+  cat_vars = cat_vars, cont_vars = cont_vars, site_name = institution,
+  tables_dir = sedation_tables_dir, institution_prefix = institution,
+  cohort_name = "full_48hr_cohort", file_stem = "full_48hr_cohort",
+  project     = current_project
+)
+
+sensitivity_model_full_48 <- fit_model_safe(
+  outcome    = "percent_deep_sedation_48",
+  exposure   = "lang_cat_6",
+  covariates = standard_covariates,
+  data       = full_48hr_cohort,
+  weights    = full_48hr_cohort$ipw,
+  model_name = "sensitivity_model_full_48",
+  cohort_name = "full_48hr_cohort",
+  project    = current_project
+)
+
+if (!is.null(sensitivity_model_full_48)) {
+  tryCatch({
+    robust_se <- tryCatch(
+      vcovHC(sensitivity_model_full_48, type = "HC3"),
+      error = function(e) NULL
+    )
+    if (is.null(robust_se) || anyNA(robust_se)) {
+      warning("HC3 robust SE failed at this site; falling back to HC0.")
+      robust_se <- vcovHC(sensitivity_model_full_48, type = "HC0")
+    }
+
+    sensitivity_model_full_48_sandwich <- coeftest(sensitivity_model_full_48, vcov = robust_se)
+
+    sensitivity_model_full_48_results <- data.frame(
+      term      = rownames(sensitivity_model_full_48_sandwich),
+      estimate  = sensitivity_model_full_48_sandwich[, "Estimate"],
+      std.error = sensitivity_model_full_48_sandwich[, "Std. Error"],
+      variance  = sensitivity_model_full_48_sandwich[, "Std. Error"]^2,
+      p.value   = sensitivity_model_full_48_sandwich[, "Pr(>|t|)"]
+    )
+    fwrite(sensitivity_model_full_48_results,
+           file.path(sedation_sensitivity,
+                     paste0(institution, "_sensitivity_analysis_full_48hr.csv")))
+  }, error = function(e) {
+    message("Skipping sensitivity_model_full_48 sandwich SE step: ", conditionMessage(e))
+  })
+}
+
+# ---- IPW Weight Diagnostics (after model fit on final winsorized weights) ----
+if (nrow(full_48hr_cohort) > 0 && !is.null(full_48hr_cohort$ipw)) {
+  tryCatch({
+    n_posttrim  <- nrow(full_48hr_cohort)
+    n_winsorized <- full_48hr_cohort[
+      ipw == ipw_q[1] | ipw == ipw_q[2], .N
+    ]
+    pct_winsorized <- 100 * n_winsorized / n_pretrim
+
+    # Overall weight diagnostics
+    ipw_overall <- full_48hr_cohort[, .(
+      site           = institution,
+      cohort         = "full_48hr_cohort",
+      n_total        = n_pretrim,
+      n_winsorized   = n_winsorized,
+      pct_winsorized = pct_winsorized,
+      trim_lower     = ipw_q[1],
+      trim_upper     = ipw_q[2],
+      mean_ipw       = mean(ipw, na.rm = TRUE),
+      median_ipw     = median(ipw, na.rm = TRUE),
+      sd_ipw         = sd(ipw, na.rm = TRUE),
+      min_ipw        = min(ipw, na.rm = TRUE),
+      max_ipw        = max(ipw, na.rm = TRUE),
+      p25_ipw        = quantile(ipw, 0.25, na.rm = TRUE),
+      p75_ipw        = quantile(ipw, 0.75, na.rm = TRUE),
+      p99_ipw        = quantile(ipw, 0.99, na.rm = TRUE),
+      ess            = (sum(ipw))^2 / sum(ipw^2),
+      ess_pct        = 100 * ((sum(ipw))^2 / sum(ipw^2)) / .N
+    )]
+
+    # By-group weight diagnostics
+    ipw_by_group <- full_48hr_cohort[!is.na(lang_cat_6), .(
+      site           = institution,
+      cohort         = "full_48hr_cohort",
+      n              = .N,
+      mean_ipw       = mean(ipw, na.rm = TRUE),
+      median_ipw     = median(ipw, na.rm = TRUE),
+      sd_ipw         = sd(ipw, na.rm = TRUE),
+      min_ipw        = min(ipw, na.rm = TRUE),
+      max_ipw        = max(ipw, na.rm = TRUE),
+      p25_ipw        = quantile(ipw, 0.25, na.rm = TRUE),
+      p75_ipw        = quantile(ipw, 0.75, na.rm = TRUE),
+      p99_ipw        = quantile(ipw, 0.99, na.rm = TRUE),
+      ess            = (sum(ipw))^2 / sum(ipw^2),
+      ess_pct        = 100 * ((sum(ipw))^2 / sum(ipw^2)) / .N
+    ), by = lang_cat_6]
+
+    # ---- Covariate balance: continuous variables ----------------------------
+    calc_smd_continuous <- function(x, group, w = NULL, g1 = "english", g2 = "spanish") {
+      x1 <- x[group == g1]; x2 <- x[group == g2]
+      w1 <- if (!is.null(w)) w[group == g1] else rep(1, length(x1))
+      w2 <- if (!is.null(w)) w[group == g2] else rep(1, length(x2))
+      x1 <- x1[!is.na(x1)]; x2 <- x2[!is.na(x2)]
+      w1 <- w1[!is.na(x1)];  w2 <- w2[!is.na(x2)]
+      if (length(x1) < 2 || length(x2) < 2) return(NA_real_)
+      m1 <- weighted.mean(x1, w1); m2 <- weighted.mean(x2, w2)
+      v1 <- sum(w1 * (x1 - m1)^2) / sum(w1)
+      v2 <- sum(w2 * (x2 - m2)^2) / sum(w2)
+      sd_pool <- sqrt((v1 + v2) / 2)
+      if (sd_pool == 0) return(NA_real_)
+      (m2 - m1) / sd_pool
+    }
+
+    # ---- Covariate balance: categorical variables ---------------------------
+    calc_smd_categorical <- function(x, group, w = NULL, g1 = "english", g2 = "spanish") {
+      # Multilevel categorical SMD using pooled covariance matrix (Yang & Dalton 2012)
+      # For binary variables this reduces to the standard binary SMD
+      dsub <- data.table(x = as.character(x), group = as.character(group),
+                         w = if (!is.null(w)) w else rep(1, length(x)))
+      dsub <- dsub[!is.na(group) & group %in% c(g1, g2)]
+      dsub[is.na(x), x := "missing"]
+      levs     <- sort(unique(dsub$x))
+      if (length(levs) < 2) return(NA_real_)
+      ref_lev  <- levs[1]
+      keep_levs <- levs[levs != ref_lev]
+      make_wt_props <- function(grp) {
+        sub <- dsub[group == grp]
+        if (nrow(sub) == 0) return(rep(NA_real_, length(keep_levs)))
+        sapply(keep_levs, function(lv) weighted.mean(sub$x == lv, sub$w))
+      }
+      make_wt_cov <- function(grp) {
+        sub <- dsub[group == grp]
+        if (nrow(sub) < 2) return(matrix(NA_real_, length(keep_levs), length(keep_levs)))
+        M <- sapply(keep_levs, function(lv) as.numeric(sub$x == lv))
+        if (is.null(dim(M))) M <- matrix(M, ncol = 1)
+        # Weighted covariance
+        wts <- sub$w / sum(sub$w)
+        wm  <- colMeans(M * wts * nrow(M))  # weighted means
+        sweep_M <- sweep(M, 2, colMeans(sweep(M, 1, wts, "*") * nrow(M)))
+        t(sweep_M * wts) %*% sweep_M * nrow(M)
+      }
+      p1 <- make_wt_props(g1); p2 <- make_wt_props(g2)
+      if (any(is.na(p1)) || any(is.na(p2))) return(NA_real_)
+      d <- p2 - p1
+      S1 <- make_wt_cov(g1); S2 <- make_wt_cov(g2)
+      S_pooled <- (S1 + S2) / 2
+      S_inv <- tryCatch(solve(S_pooled), error = function(e) {
+        tryCatch(MASS::ginv(S_pooled), error = function(e2) NULL)
+      })
+      if (is.null(S_inv)) return(NA_real_)
+      as.numeric(sqrt(t(d) %*% S_inv %*% d))
+    }
+
+    balance_cont <- lapply(intersect(cont_vars, names(full_48hr_cohort)), function(v) {
+  sub <- full_48hr_cohort[!is.na(lang_cat_6) & !is.na(get(v))]
+  if (nrow(sub) == 0) return(NULL)
+  smd_uw <- calc_smd_continuous(sub[[v]], sub$lang_cat_6, w = NULL)
+  smd_w  <- calc_smd_continuous(sub[[v]], sub$lang_cat_6, w = sub$ipw)
+  data.table(
+    site             = institution,
+    cohort           = "full_48hr_cohort",
+    variable         = v,
+    variable_type    = "continuous",
+    smd_unweighted   = smd_uw,
+    smd_weighted     = smd_w,
+    smd_change       = smd_w - smd_uw,
+    balance_improved = abs(smd_w) < abs(smd_uw)
+  )
+})
+
+    balance_cat <- lapply(intersect(cat_vars, names(full_48hr_cohort)), function(v) {
+  sub <- full_48hr_cohort[!is.na(lang_cat_6) & !is.na(get(v))]
+  if (nrow(sub) == 0) return(NULL)
+  smd_uw <- calc_smd_categorical(sub[[v]], sub$lang_cat_6, w = NULL)
+  smd_w  <- calc_smd_categorical(sub[[v]], sub$lang_cat_6, w = sub$ipw)
+  data.table(
+    site             = institution,
+    cohort           = "full_48hr_cohort",
+    variable         = v,
+    variable_type    = "categorical",
+    smd_unweighted   = smd_uw,
+    smd_weighted     = smd_w,
+    smd_change       = smd_w - smd_uw,
+    balance_improved = abs(smd_w) < abs(smd_uw)
+  )
+})
+
+    balance_dt <- rbindlist(c(balance_cont, balance_cat), fill = TRUE, use.names = TRUE)
+
+    # Summary: how many variables improved balance
+    n_improved    <- sum(balance_dt$balance_improved, na.rm = TRUE)
+    n_vars        <- sum(!is.na(balance_dt$balance_improved))
+    n_below_thresh <- sum(abs(balance_dt$smd_weighted) < 0.1, na.rm = TRUE)
+
+    balance_summary <- data.table(
+      site                    = institution,
+      cohort                  = "full_48hr_cohort",
+      n_vars_assessed         = n_vars,
+      n_vars_balance_improved = n_improved,
+      n_vars_smd_below_0.1   = n_below_thresh,
+      pct_vars_below_0.1      = 100 * n_below_thresh / n_vars,
+      max_smd_unweighted      = max(abs(balance_dt$smd_unweighted), na.rm = TRUE),
+      max_smd_weighted        = max(abs(balance_dt$smd_weighted),   na.rm = TRUE)
+    )
+
+    # ---- Weight density plot ------------------------------------------------
+    tryCatch({
+      plot_data <- full_48hr_cohort[!is.na(lang_cat_6), .(ipw, lang_cat_6)]
+      p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = ipw, fill = lang_cat_6)) +
+        ggplot2::geom_density(alpha = 0.5) +
+        ggplot2::geom_vline(xintercept = ipw_q, linetype = "dashed", color = "grey40") +
+        ggplot2::scale_fill_manual(values = c("english" = "#4477AA", "spanish" = "#EE6677")) +
+        ggplot2::labs(
+          title = paste0(institution, ": IPW Weight Distribution (Full 48hr Cohort)"),
+          x     = "Inverse Probability Weight",
+          y     = "Density",
+          fill  = "Language Group",
+          caption = sprintf(
+            "Dashed lines: winsorization bounds [%.3f, %.3f]. N winsorized: %d (%.1f%%)",
+            ipw_q[1], ipw_q[2], n_winsorized, pct_winsorized
+          )
+        ) +
+        ggplot2::theme_minimal()
+      ggplot2::ggsave(
+        file.path(sedation_sensitivity,
+                  paste0(institution, "_ipw_weight_density_full_48hr.png")),
+        plot = p, width = 8, height = 5, dpi = 300
+      )
+      message("  Weight density plot saved")
+    }, error = function(e) {
+      message("  Skipping weight density plot: ", conditionMessage(e))
+    })
+
+    # ---- Predicted probability overlap plot ---------------------------------
+    tryCatch({
+      model_data_plot <- unique(ipw_sensitivity_analysis, by = "hospitalization_id")
+      model_data_plot[, predicted_prob := predict(
+        ipw_model, newdata = model_data_plot, type = "response"
+      )]
+      plot_data_prob <- model_data_plot[!is.na(lang_cat_6),
+                                        .(predicted_prob, lang_cat_6, reached_48h)]
+      p2 <- ggplot2::ggplot(plot_data_prob,
+                            ggplot2::aes(x = predicted_prob, fill = lang_cat_6)) +
+        ggplot2::geom_density(alpha = 0.5) +
+        ggplot2::geom_vline(xintercept = 0.05, linetype = "dotted", color = "red") +
+        ggplot2::scale_fill_manual(values = c("english" = "#4477AA", "spanish" = "#EE6677")) +
+        ggplot2::labs(
+          title   = paste0(institution, ": Predicted P(IMV >= 48h) by Language Group"),
+          x       = "Predicted Probability",
+          y       = "Density",
+          fill    = "Language Group",
+          caption = "Red dotted line: positivity threshold (p < 0.05)"
+        ) +
+        ggplot2::theme_minimal()
+      ggplot2::ggsave(
+        file.path(sedation_sensitivity,
+                  paste0(institution, "_ipw_predicted_prob_overlap_full_48hr.png")),
+        plot = p2, width = 8, height = 5, dpi = 300
+      )
+      message("  Predicted probability overlap plot saved")
+    }, error = function(e) {
+      message("  Skipping predicted probability overlap plot: ", conditionMessage(e))
+    })
+
+    # ---- Write all weight diagnostics ---------------------------------------
+    fwrite(ipw_overall,
+           file.path(rerun_tables_dir,
+                     paste0(institution, "_ipw_diagnostics_full_48hr_overall.csv")))
+    fwrite(ipw_by_group,
+           file.path(rerun_tables_dir,
+                     paste0(institution, "_ipw_diagnostics_full_48hr_by_group.csv")))
+    fwrite(balance_dt,
+           file.path(rerun_tables_dir,
+                     paste0(institution, "_ipw_balance_diagnostics_full_48hr.csv")))
+    fwrite(balance_summary,
+           file.path(rerun_tables_dir,
+                     paste0(institution, "_ipw_balance_summary_full_48hr.csv")))
+
+    message("IPW weight diagnostics written for full_48hr_cohort")
+    message(sprintf("  Winsorized: %d (%.1f%%) at [%.3f, %.3f]",
+                    n_winsorized, pct_winsorized, ipw_q[1], ipw_q[2]))
+    message(sprintf("  Post-winsorization: mean=%.3f, median=%.3f, max=%.3f, ESS=%.0f (%.1f%%)",
+                    ipw_overall$mean_ipw, ipw_overall$median_ipw,
+                    ipw_overall$max_ipw, ipw_overall$ess, ipw_overall$ess_pct))
+    message(sprintf("  Balance: %d/%d vars improved; %d/%d below SMD 0.1 threshold",
+                    n_improved, n_vars, n_below_thresh, n_vars))
+
+  }, error = function(e) {
+    message("Skipping IPW weight diagnostics for full_48hr_cohort: ", conditionMessage(e))
+  })
+}
+```
+
+
+#ICU IMV and Hospital Type Tabulation
+```{r}
+lang_icu_counts <- primary_cohort[
+  , .(count = .N),
+  by = .(lang_cat_6, icu_imv)
+][
+  order(lang_cat_6, icu_imv)
+]
+
+lang_icu_counts
+
+fwrite(lang_icu_counts,
+       file.path(rerun_tables_dir, paste0(institution, "_icu_counts_table_1.csv")))
+
+
+lang_hospital_type_counts <- primary_cohort[
+  , .(count = .N),
+  by = .(lang_cat_6, hospital_type)
+][
+  order(lang_cat_6, hospital_type)
+]
+
+lang_hospital_type_counts
+
+fwrite(lang_hospital_type_counts,
+       file.path(rerun_tables_dir, paste0(institution, "_hospital_type_counts_table_1.csv")))
+
+
+```
+
+
+#Risk Differences Re-Run for Binary Outcomes
+```{r}
+secondary_model_trach <- fit_model_safe(
+  outcome     = "trached",
+  exposure    = "lang_cat_6",
+  covariates  = standard_covariates,
+  data        = primary_cohort,
+  model_name  = "secondary_model_trach",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(secondary_model_trach)) {
+  fwrite(extract_glm_results(secondary_model_trach),
+         file.path(rerun_final_data, paste0(institution, "_secondary_analysis_trach.csv")))
+  
+  fwrite(extract_glm_marginal(
+    model        = secondary_model_trach,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "secondary_model_trach",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_secondary_analysis_trach_marginal.csv")))
+}
+
+secondary_model_28day_mortality <- fit_model_safe(
+  outcome     = "mortality_28day",
+  exposure    = "lang_cat_6",
+  covariates  = standard_covariates,
+  data        = primary_cohort,
+  model_name  = "secondary_model_28day_mortality",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(secondary_model_28day_mortality)) {
+  fwrite(extract_glm_results(secondary_model_28day_mortality),
+         file.path(rerun_final_data, paste0(institution, "_secondary_analysis_28_day_mortality.csv")))
+  fwrite(extract_glm_marginal(
+    model        = secondary_model_28day_mortality,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "secondary_model_28day_mortality",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_secondary_analysis_28_day_mortality_marginal.csv")))
+}
+
+secondary_model_reintubation <- fit_model_safe(
+  outcome     = "reintubation_final",
+  exposure    = "lang_cat_6",
+  covariates  = standard_covariates,
+  data        = primary_cohort,
+  model_name  = "secondary_model_reintubation",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(secondary_model_reintubation)) {
+  fwrite(extract_glm_results(secondary_model_reintubation),
+         file.path(rerun_final_data, paste0(institution, "_secondary_analysis_reintubation.csv")))
+  fwrite(extract_glm_marginal(
+    model        = secondary_model_reintubation,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "secondary_model_reintubation",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_secondary_analysis_reintubation_marginal.csv")))
+}
+
+secondary_model_inhospital_mortality <- fit_model_safe(
+  outcome     = "death_during_admission",
+  exposure    = "lang_cat_6",
+  covariates  = standard_covariates,
+  data        = primary_cohort,
+  model_name  = "secondary_model_inhospital_mortality",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(secondary_model_inhospital_mortality)) {
+  fwrite(extract_glm_results(secondary_model_inhospital_mortality),
+         file.path(rerun_final_data, paste0(institution, "_secondary_analysis_in_hospital_mortality.csv")))
+  fwrite(extract_glm_marginal(
+    model        = secondary_model_inhospital_mortality,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "secondary_model_inhospital_mortality",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_secondary_analysis_in_hospital_mortality_marginal.csv")))
+}
+
+
+sensitivity_model_alt_outcome_definition_1 <- fit_model_safe(
+  outcome     = "deep_sedation_weighted",
+  exposure    = "lang_cat_6",
+  covariates  = standard_covariates,
+  data        = primary_cohort,
+  model_name  = "sensitivity_model_weighted_deep_sedation",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(sensitivity_model_alt_outcome_definition_1)) {
+  fwrite(extract_glm_results(sensitivity_model_alt_outcome_definition_1),
+         file.path(rerun_final_data, paste0(institution, "_sensitivity_analysis_weighted_deep_sedation.csv")))
+  fwrite(extract_glm_marginal(
+    model        = sensitivity_model_alt_outcome_definition_1,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "sensitivity_model_weighted_deep_sedation",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_sensitivity_analysis_weighted_deep_sedation_marginal.csv")))
+}
+
+exploratory_model_benzo_odds <- fit_model_safe(
+  outcome     = "cont_benzos_receipt",
+  exposure    = "lang_cat_6",
+  covariates  = exploratory_binary_covariates,
+  data        = primary_cohort,
+  model_name  = "exploratory_model_benzo_odds",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(exploratory_model_benzo_odds)) {
+  fwrite(extract_glm_results(exploratory_model_benzo_odds),
+         file.path(rerun_final_data, paste0(institution, "_exploratory_analysis_benzo_odds.csv")))
+  fwrite(extract_glm_marginal(
+    model        = exploratory_model_benzo_odds,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "exploratory_model_benzo_odds",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_exploratory_analysis_benzo_odds_marginal.csv")))
+}
+
+exploratory_model_opioid_only_analgesia <- fit_model_safe(
+  outcome     = "cont_analgesia_only",
+  exposure    = "lang_cat_6",
+  covariates  = exploratory_binary_covariates,
+  data        = primary_cohort,
+  model_name  = "exploratory_model_opioid_only_analgesia",
+  cohort_name = "primary_cohort",
+  family      = binomial(link = "logit"),
+  project     = current_project
+)
+if (!is.null(exploratory_model_opioid_only_analgesia)) {
+  fwrite(extract_glm_results(exploratory_model_opioid_only_analgesia),
+         file.path(rerun_final_data, paste0(institution, "_exploratory_analysis_opioid_only.csv")))
+  fwrite(extract_glm_marginal(
+    model        = exploratory_model_opioid_only_analgesia,
+    data         = primary_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    site_name    = institution,
+    model_name   = "exploratory_model_opioid_only_analgesia",
+    cohort_name  = "primary_cohort"
+  ), file.path(rerun_final_data,
+               paste0(institution, "_exploratory_analysis_opioid_only_marginal.csv")))
+}
+```
+
+#Rebuild Tables for Paralytics Re-Run
+```{r}
+relevel_paralytic_subgroup <- function(dt) {
+  if (is.null(dt) || nrow(dt) == 0) return(dt)
+  dt$sex_category       <- relevel(as.factor(dt$sex_category),       ref = "male")
+  dt$race_category      <- relevel(as.factor(dt$race_category),      ref = "white")
+  dt$ethnicity_category <- relevel(as.factor(dt$ethnicity_category), ref = "non-hispanic")
+  dt$ethnicity_category_final <- relevel(as.factor(dt$ethnicity_category_final), ref = "non-hispanic/unknown")
+  dt
+}
+
+lang_cat_3_cohort <- total_cohort[!is.na(lang_cat_3)]
+lang_cat_3_cohort$language_category       <- relevel(as.factor(lang_cat_3_cohort$language_category),       ref = "english")
+lang_cat_3_cohort$lang_cat_1              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_1),              ref = "english")
+lang_cat_3_cohort$lang_cat_2              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_2),              ref = "english")
+lang_cat_3_cohort$lang_cat_3              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_3),              ref = "english")
+lang_cat_3_cohort$lang_cat_4              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_4),              ref = "english")
+lang_cat_3_cohort$lang_cat_5              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_5),              ref = "english")
+lang_cat_3_cohort$lang_cat_6              <- relevel(as.factor(lang_cat_3_cohort$lang_cat_6),              ref = "english")
+lang_cat_3_cohort$sex_category            <- relevel(as.factor(lang_cat_3_cohort$sex_category),            ref = "male")
+lang_cat_3_cohort$race_category           <- relevel(as.factor(lang_cat_3_cohort$race_category),           ref = "white")
+lang_cat_3_cohort$ethnicity_category      <- relevel(as.factor(lang_cat_3_cohort$ethnicity_category),      ref = "non-hispanic")
+lang_cat_3_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_3_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+lang_cat_4_cohort <- total_cohort[!is.na(lang_cat_4)]
+lang_cat_4_cohort$language_category       <- relevel(as.factor(lang_cat_4_cohort$language_category),       ref = "english")
+lang_cat_4_cohort$lang_cat_4              <- relevel(as.factor(lang_cat_4_cohort$lang_cat_4),              ref = "english")
+lang_cat_4_cohort$sex_category            <- relevel(as.factor(lang_cat_4_cohort$sex_category),            ref = "male")
+lang_cat_4_cohort$race_category           <- relevel(as.factor(lang_cat_4_cohort$race_category),           ref = "white")
+lang_cat_4_cohort$ethnicity_category      <- relevel(as.factor(lang_cat_4_cohort$ethnicity_category),      ref = "non-hispanic")
+lang_cat_4_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_4_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+lang_cat_5_cohort <- total_cohort[!is.na(lang_cat_5)]
+lang_cat_5_cohort$language_category       <- relevel(as.factor(lang_cat_5_cohort$language_category),       ref = "english")
+lang_cat_5_cohort$lang_cat_5              <- relevel(as.factor(lang_cat_5_cohort$lang_cat_5),              ref = "english")
+lang_cat_5_cohort$sex_category            <- relevel(as.factor(lang_cat_5_cohort$sex_category),            ref = "male")
+lang_cat_5_cohort$race_category           <- relevel(as.factor(lang_cat_5_cohort$race_category),           ref = "white")
+lang_cat_5_cohort$ethnicity_category      <- relevel(as.factor(lang_cat_5_cohort$ethnicity_category),      ref = "non-hispanic")
+lang_cat_5_cohort$ethnicity_category_final <- relevel(as.factor(lang_cat_5_cohort$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+primary_cohort_all_icus <- total_cohort[!is.na(lang_cat_6)]
+primary_cohort_all_icus$language_category       <- relevel(as.factor(primary_cohort_all_icus$language_category),       ref = "english")
+primary_cohort_all_icus$lang_cat_6              <- relevel(as.factor(primary_cohort_all_icus$lang_cat_6),              ref = "english")
+primary_cohort_all_icus$sex_category            <- relevel(as.factor(primary_cohort_all_icus$sex_category),            ref = "male")
+primary_cohort_all_icus$race_category           <- relevel(as.factor(primary_cohort_all_icus$race_category),           ref = "white")
+primary_cohort_all_icus$ethnicity_category      <- relevel(as.factor(primary_cohort_all_icus$ethnicity_category),      ref = "non-hispanic")
+primary_cohort_all_icus$ethnicity_category_final <- relevel(as.factor(primary_cohort_all_icus$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+lang_cat_1_2_arf_cohort <- relevel_paralytic_subgroup(total_cohort[arf_flag == TRUE])
+lang_cat_1_2_arf_cohort$lang_cat_1 <- relevel(as.factor(lang_cat_1_2_arf_cohort$lang_cat_1), ref = "english")
+lang_cat_1_2_arf_cohort$lang_cat_2 <- relevel(as.factor(lang_cat_1_2_arf_cohort$lang_cat_2), ref = "english")
+
+lang_cat_3_arf_cohort <- relevel_paralytic_subgroup(lang_cat_3_cohort[arf_flag == TRUE])
+lang_cat_3_arf_cohort$lang_cat_3 <- relevel(as.factor(lang_cat_3_arf_cohort$lang_cat_3), ref = "english")
+
+lang_cat_4_arf_cohort <- relevel_paralytic_subgroup(lang_cat_4_cohort[arf_flag == TRUE])
+lang_cat_4_arf_cohort$lang_cat_4 <- relevel(as.factor(lang_cat_4_arf_cohort$lang_cat_4), ref = "english")
+
+lang_cat_5_arf_cohort <- relevel_paralytic_subgroup(lang_cat_5_cohort[arf_flag == TRUE])
+lang_cat_5_arf_cohort$lang_cat_5 <- relevel(as.factor(lang_cat_5_arf_cohort$lang_cat_5), ref = "english")
+
+lang_cat_6_arf_cohort <- relevel_paralytic_subgroup(primary_cohort_all_icus[arf_flag == TRUE])
+lang_cat_6_arf_cohort$lang_cat_6 <- relevel(as.factor(lang_cat_6_arf_cohort$lang_cat_6), ref = "english")
+
+lang_cat_7_arf_cohort <- relevel_paralytic_subgroup(total_cohort[arf_flag == TRUE])
+lang_cat_7_arf_cohort$lang_cat_7 <- relevel(as.factor(lang_cat_7_arf_cohort$lang_cat_7), ref = "english")
+
+lang_cat_1_2_non_arf_cohort <- relevel_paralytic_subgroup(total_cohort[arf_flag == FALSE])
+lang_cat_1_2_non_arf_cohort$lang_cat_1 <- relevel(as.factor(lang_cat_1_2_non_arf_cohort$lang_cat_1), ref = "english")
+lang_cat_1_2_non_arf_cohort$lang_cat_2 <- relevel(as.factor(lang_cat_1_2_non_arf_cohort$lang_cat_2), ref = "english")
+
+lang_cat_3_non_arf_cohort <- relevel_paralytic_subgroup(lang_cat_3_cohort[arf_flag == FALSE])
+lang_cat_3_non_arf_cohort$lang_cat_3 <- relevel(as.factor(lang_cat_3_non_arf_cohort$lang_cat_3), ref = "english")
+
+lang_cat_4_non_arf_cohort <- relevel_paralytic_subgroup(lang_cat_4_cohort[arf_flag == FALSE])
+lang_cat_4_non_arf_cohort$lang_cat_4 <- relevel(as.factor(lang_cat_4_non_arf_cohort$lang_cat_4), ref = "english")
+
+lang_cat_5_non_arf_cohort <- relevel_paralytic_subgroup(lang_cat_5_cohort[arf_flag == FALSE])
+lang_cat_5_non_arf_cohort$lang_cat_5 <- relevel(as.factor(lang_cat_5_non_arf_cohort$lang_cat_5), ref = "english")
+
+lang_cat_6_non_arf_cohort <- relevel_paralytic_subgroup(primary_cohort_all_icus[arf_flag == FALSE])
+lang_cat_6_non_arf_cohort$lang_cat_6 <- relevel(as.factor(lang_cat_6_non_arf_cohort$lang_cat_6), ref = "english")
+
+lang_cat_7_non_arf_cohort <- relevel_paralytic_subgroup(total_cohort[arf_flag == FALSE])
+lang_cat_7_non_arf_cohort$lang_cat_7 <- relevel(as.factor(lang_cat_7_non_arf_cohort$lang_cat_7), ref = "english")
+
+paralytic_exploratory_analysis <- read_parquet(paste0(intermediate_dir, "analytic_file", institution, ".parquet"))
+setDT(paralytic_exploratory_analysis)
+
+paralytic_exploratory_analysis[, lang_cat_1 := fifelse(
+  language_category == "english", "english",
+  fifelse(!is.na(language_category), "non-english", NA_character_)
+)]
+
+paralytic_exploratory_analysis$lang_cat_1               <- relevel(as.factor(paralytic_exploratory_analysis$lang_cat_1),               ref = "english")
+paralytic_exploratory_analysis$sex_category             <- relevel(as.factor(paralytic_exploratory_analysis$sex_category),             ref = "male")
+paralytic_exploratory_analysis$race_category            <- relevel(as.factor(paralytic_exploratory_analysis$race_category),            ref = "white")
+paralytic_exploratory_analysis$ethnicity_category       <- relevel(as.factor(paralytic_exploratory_analysis$ethnicity_category),       ref = "non-hispanic")
+paralytic_exploratory_analysis$ethnicity_category_final <- relevel(as.factor(paralytic_exploratory_analysis$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+arf_paralytic_exploratory_analysis <- paralytic_exploratory_analysis[arf_flag == TRUE]
+arf_paralytic_exploratory_analysis$lang_cat_1               <- relevel(as.factor(arf_paralytic_exploratory_analysis$lang_cat_1),               ref = "english")
+arf_paralytic_exploratory_analysis$sex_category             <- relevel(as.factor(arf_paralytic_exploratory_analysis$sex_category),             ref = "male")
+arf_paralytic_exploratory_analysis$race_category            <- relevel(as.factor(arf_paralytic_exploratory_analysis$race_category),            ref = "white")
+arf_paralytic_exploratory_analysis$ethnicity_category       <- relevel(as.factor(arf_paralytic_exploratory_analysis$ethnicity_category),       ref = "non-hispanic")
+arf_paralytic_exploratory_analysis$ethnicity_category_final <- relevel(as.factor(arf_paralytic_exploratory_analysis$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+non_arf_paralytic_exploratory_analysis <- paralytic_exploratory_analysis[arf_flag == FALSE]
+non_arf_paralytic_exploratory_analysis$lang_cat_1               <- relevel(as.factor(non_arf_paralytic_exploratory_analysis$lang_cat_1),               ref = "english")
+non_arf_paralytic_exploratory_analysis$sex_category             <- relevel(as.factor(non_arf_paralytic_exploratory_analysis$sex_category),             ref = "male")
+non_arf_paralytic_exploratory_analysis$race_category            <- relevel(as.factor(non_arf_paralytic_exploratory_analysis$race_category),            ref = "white")
+non_arf_paralytic_exploratory_analysis$ethnicity_category       <- relevel(as.factor(non_arf_paralytic_exploratory_analysis$ethnicity_category),       ref = "non-hispanic")
+non_arf_paralytic_exploratory_analysis$ethnicity_category_final <- relevel(as.factor(non_arf_paralytic_exploratory_analysis$ethnicity_category_final), ref = "non-hispanic/unknown")
+
+cont_vars_explore <- c("age_at_admission", "bmi", "elixhauser_score", "SVM_SCORE",
+                       "laps2", "time_to_first_rass", "rass_frequency_hrs",
+                       "observation_year")
+
+# Covariate set used for all exploratory disparity models — note no SVM_SCORE,
+# matches what the original code used.
+exploratory_covariates_paralytic <- c(
+  "race_category", "lang_cat_1", "age_category", "bmi", "sex_category",
+  "factor(hospital_icu_id)", "elixhauser_score", "laps2",
+  "factor(observation_year)"
+)
+
+```
+
+#Risk Difference in Paralytic Use for Paralytic Project
+```{r}
+current_project <- "paralytic"
+################################################################################
+# PARALYTIC PROJECT - Model fitting + marginal RD extraction
+# Table 1s omitted (no changes needed)
+################################################################################
+
+# ── STEP 1: All IMV patients ──────────────────────────────────────────────────
+
+lang_cat_1_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_1",
+  covariates  = paralytic_covariates,
+  data        = total_cohort,
+  model_name  = "lang_cat_1_nmbas",
+  cohort_name = "total_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_1_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_1_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_1.csv")))
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_1_nmbas,
+    data         = total_cohort,
+    exposure     = "lang_cat_1",
+    ref_level    = "english",
+    target_level = "non-english",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_1_nmbas",
+    cohort_name  = "total_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_1_marginal.csv")))
+}
+
+lang_cat_2_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_2",
+  covariates  = paralytic_covariates,
+  data        = total_cohort,
+  model_name  = "lang_cat_2_nmbas",
+  cohort_name = "total_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_2_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_2_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_2.csv")))
+  # lang_cat_2 has 3 levels (english/spanish/other non-english) — run marginal
+  # separately for each non-english comparator
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_2_nmbas,
+    data         = total_cohort,
+    exposure     = "lang_cat_2",
+    ref_level    = "english",
+    target_level = "spanish",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_2_nmbas_spanish",
+    cohort_name  = "total_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_2_marginal_spanish.csv")))
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_2_nmbas,
+    data         = total_cohort,
+    exposure     = "lang_cat_2",
+    ref_level    = "english",
+    target_level = "other non-english",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_2_nmbas_other",
+    cohort_name  = "total_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_2_marginal_other_non_english.csv")))
+}
+
+lang_cat_3_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_3",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_3_cohort,
+  model_name  = "lang_cat_3_nmbas",
+  cohort_name = "lang_cat_3_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_3_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_3_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_3.csv")))
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_3_nmbas,
+    data         = lang_cat_3_cohort,
+    exposure     = "lang_cat_3",
+    ref_level    = "english",
+    target_level = "spanish",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_3_nmbas_spanish",
+    cohort_name  = "lang_cat_3_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_3_marginal_spanish.csv")))
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_3_nmbas,
+    data         = lang_cat_3_cohort,
+    exposure     = "lang_cat_3",
+    ref_level    = "english",
+    target_level = "third_lang_cat",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_3_nmbas_third_lang",
+    cohort_name  = "lang_cat_3_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_3_marginal_third_lang.csv")))
+}
+
+lang_cat_4_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_4",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_4_cohort,
+  model_name  = "lang_cat_4_nmbas",
+  cohort_name = "lang_cat_4_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_4_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_4_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_4.csv")))
+  for (tgt in c("spanish", "chinese", "vietnamese")) {
+    fwrite(extract_glm_marginal(
+      model        = lang_cat_4_nmbas,
+      data         = lang_cat_4_cohort,
+      exposure     = "lang_cat_4",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("lang_cat_4_nmbas_", tgt),
+      cohort_name  = "lang_cat_4_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_4_marginal_", tgt, ".csv")))
+  }
+}
+
+lang_cat_5_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_5",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_5_cohort,
+  model_name  = "lang_cat_5_nmbas",
+  cohort_name = "lang_cat_5_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_5_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_5_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_5.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "continental_european_langs", "mena")) {
+    fwrite(extract_glm_marginal(
+      model        = lang_cat_5_nmbas,
+      data         = lang_cat_5_cohort,
+      exposure     = "lang_cat_5",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("lang_cat_5_nmbas_", tgt),
+      cohort_name  = "lang_cat_5_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_5_marginal_", tgt, ".csv")))
+  }
+}
+
+lang_cat_6_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_6",
+  covariates  = paralytic_covariates,
+  data        = primary_cohort_all_icus,
+  model_name  = "lang_cat_6_nmbas",
+  cohort_name = "primary_cohort_all_icus",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_6_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_6_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_6.csv")))
+  fwrite(extract_glm_marginal(
+    model        = lang_cat_6_nmbas,
+    data         = primary_cohort_all_icus,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "lang_cat_6_nmbas",
+    cohort_name  = "primary_cohort_all_icus"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_6_marginal.csv")))
+}
+
+lang_cat_7_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_7",
+  covariates  = paralytic_covariates,
+  data        = total_cohort,
+  model_name  = "lang_cat_7_nmbas",
+  cohort_name = "total_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(lang_cat_7_nmbas)) {
+  fwrite(extract_glm_results(lang_cat_7_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_7.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "other_asian", "sub_saharan_african", "continental_european_langs",
+                "mena", "all_other_langs")) {
+    fwrite(extract_glm_marginal(
+      model        = lang_cat_7_nmbas,
+      data         = total_cohort,
+      exposure     = "lang_cat_7",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("lang_cat_7_nmbas_", tgt),
+      cohort_name  = "total_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_7_marginal_", tgt, ".csv")))
+  }
+}
+
+# ── STEP 2: ARF Subgroup ──────────────────────────────────────────────────────
+
+arf_lang_cat_1_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_1",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_1_2_arf_cohort,
+  model_name  = "arf_lang_cat_1_nmbas",
+  cohort_name = "lang_cat_1_2_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_1_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_1_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_1_arf.csv")))
+  fwrite(extract_glm_marginal(
+    model        = arf_lang_cat_1_nmbas,
+    data         = lang_cat_1_2_arf_cohort,
+    exposure     = "lang_cat_1",
+    ref_level    = "english",
+    target_level = "non-english",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "arf_lang_cat_1_nmbas",
+    cohort_name  = "lang_cat_1_2_arf_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_1_arf_marginal.csv")))
+}
+
+arf_lang_cat_2_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_2",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_1_2_arf_cohort,
+  model_name  = "arf_lang_cat_2_nmbas",
+  cohort_name = "lang_cat_1_2_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_2_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_2_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_2_arf.csv")))
+  for (tgt in c("spanish", "other non-english")) {
+    fwrite(extract_glm_marginal(
+      model        = arf_lang_cat_2_nmbas,
+      data         = lang_cat_1_2_arf_cohort,
+      exposure     = "lang_cat_2",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("arf_lang_cat_2_nmbas_", gsub(" ", "_", tgt)),
+      cohort_name  = "lang_cat_1_2_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_2_arf_marginal_",
+                        gsub(" ", "_", tgt), ".csv")))
+  }
+}
+
+arf_lang_cat_3_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_3",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_3_arf_cohort,
+  model_name  = "arf_lang_cat_3_nmbas",
+  cohort_name = "lang_cat_3_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_3_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_3_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_3_arf.csv")))
+  for (tgt in c("spanish", "third_lang_cat")) {
+    fwrite(extract_glm_marginal(
+      model        = arf_lang_cat_3_nmbas,
+      data         = lang_cat_3_arf_cohort,
+      exposure     = "lang_cat_3",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("arf_lang_cat_3_nmbas_", tgt),
+      cohort_name  = "lang_cat_3_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_3_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+arf_lang_cat_4_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_4",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_4_arf_cohort,
+  model_name  = "arf_lang_cat_4_nmbas",
+  cohort_name = "lang_cat_4_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_4_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_4_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_4_arf.csv")))
+  for (tgt in c("spanish", "chinese", "vietnamese")) {
+    fwrite(extract_glm_marginal(
+      model        = arf_lang_cat_4_nmbas,
+      data         = lang_cat_4_arf_cohort,
+      exposure     = "lang_cat_4",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("arf_lang_cat_4_nmbas_", tgt),
+      cohort_name  = "lang_cat_4_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_4_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+arf_lang_cat_5_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_5",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_5_arf_cohort,
+  model_name  = "arf_lang_cat_5_nmbas",
+  cohort_name = "lang_cat_5_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_5_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_5_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_5_arf.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "continental_european_langs", "mena")) {
+    fwrite(extract_glm_marginal(
+      model        = arf_lang_cat_5_nmbas,
+      data         = lang_cat_5_arf_cohort,
+      exposure     = "lang_cat_5",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("arf_lang_cat_5_nmbas_", tgt),
+      cohort_name  = "lang_cat_5_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_5_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+arf_lang_cat_6_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_6",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_6_arf_cohort,
+  model_name  = "arf_lang_cat_6_nmbas",
+  cohort_name = "lang_cat_6_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_6_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_6_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_6_arf.csv")))
+  fwrite(extract_glm_marginal(
+    model        = arf_lang_cat_6_nmbas,
+    data         = lang_cat_6_arf_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "arf_lang_cat_6_nmbas",
+    cohort_name  = "lang_cat_6_arf_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_6_arf_marginal.csv")))
+}
+
+arf_lang_cat_7_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_7",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_7_arf_cohort,
+  model_name  = "arf_lang_cat_7_nmbas",
+  cohort_name = "lang_cat_7_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(arf_lang_cat_7_nmbas)) {
+  fwrite(extract_glm_results(arf_lang_cat_7_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_7_arf.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "other_asian", "sub_saharan_african", "continental_european_langs",
+                "mena", "all_other_langs")) {
+    fwrite(extract_glm_marginal(
+      model        = arf_lang_cat_7_nmbas,
+      data         = lang_cat_7_arf_cohort,
+      exposure     = "lang_cat_7",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("arf_lang_cat_7_nmbas_", tgt),
+      cohort_name  = "lang_cat_7_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_7_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+# ── STEP 3: Non-ARF Subgroup ──────────────────────────────────────────────────
+
+non_arf_lang_cat_1_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_1",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_1_2_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_1_nmbas",
+  cohort_name = "lang_cat_1_2_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_1_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_1_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_1_non_arf.csv")))
+  fwrite(extract_glm_marginal(
+    model        = non_arf_lang_cat_1_nmbas,
+    data         = lang_cat_1_2_non_arf_cohort,
+    exposure     = "lang_cat_1",
+    ref_level    = "english",
+    target_level = "non-english",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "non_arf_lang_cat_1_nmbas",
+    cohort_name  = "lang_cat_1_2_non_arf_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_1_non_arf_marginal.csv")))
+}
+
+non_arf_lang_cat_2_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_2",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_1_2_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_2_nmbas",
+  cohort_name = "lang_cat_1_2_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_2_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_2_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_2_non_arf.csv")))
+  for (tgt in c("spanish", "other non-english")) {
+    fwrite(extract_glm_marginal(
+      model        = non_arf_lang_cat_2_nmbas,
+      data         = lang_cat_1_2_non_arf_cohort,
+      exposure     = "lang_cat_2",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("non_arf_lang_cat_2_nmbas_", gsub(" ", "_", tgt)),
+      cohort_name  = "lang_cat_1_2_non_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_2_non_arf_marginal_",
+                        gsub(" ", "_", tgt), ".csv")))
+  }
+}
+
+non_arf_lang_cat_3_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_3",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_3_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_3_nmbas",
+  cohort_name = "lang_cat_3_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_3_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_3_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_3_non_arf.csv")))
+  for (tgt in c("spanish", "third_lang_cat")) {
+    fwrite(extract_glm_marginal(
+      model        = non_arf_lang_cat_3_nmbas,
+      data         = lang_cat_3_non_arf_cohort,
+      exposure     = "lang_cat_3",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("non_arf_lang_cat_3_nmbas_", tgt),
+      cohort_name  = "lang_cat_3_non_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_3_non_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+non_arf_lang_cat_4_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_4",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_4_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_4_nmbas",
+  cohort_name = "lang_cat_4_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_4_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_4_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_4_non_arf.csv")))
+  for (tgt in c("spanish", "chinese", "vietnamese")) {
+    fwrite(extract_glm_marginal(
+      model        = non_arf_lang_cat_4_nmbas,
+      data         = lang_cat_4_non_arf_cohort,
+      exposure     = "lang_cat_4",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("non_arf_lang_cat_4_nmbas_", tgt),
+      cohort_name  = "lang_cat_4_non_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_4_non_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+non_arf_lang_cat_5_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_5",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_5_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_5_nmbas",
+  cohort_name = "lang_cat_5_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_5_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_5_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_5_non_arf.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "continental_european_langs", "mena")) {
+    fwrite(extract_glm_marginal(
+      model        = non_arf_lang_cat_5_nmbas,
+      data         = lang_cat_5_non_arf_cohort,
+      exposure     = "lang_cat_5",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("non_arf_lang_cat_5_nmbas_", tgt),
+      cohort_name  = "lang_cat_5_non_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_5_non_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+non_arf_lang_cat_6_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_6",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_6_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_6_nmbas",
+  cohort_name = "lang_cat_6_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_6_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_6_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_6_non_arf.csv")))
+  fwrite(extract_glm_marginal(
+    model        = non_arf_lang_cat_6_nmbas,
+    data         = lang_cat_6_non_arf_cohort,
+    exposure     = "lang_cat_6",
+    ref_level    = "english",
+    target_level = "spanish",
+    n_boot       = 100,
+    site_name    = institution,
+    model_name   = "non_arf_lang_cat_6_nmbas",
+    cohort_name  = "lang_cat_6_non_arf_cohort"
+  ), file.path(rerun_paralytics,
+               paste0(institution, "_paralysis_lang_cat_6_non_arf_marginal.csv")))
+}
+
+non_arf_lang_cat_7_nmbas <- fit_model_safe(
+  outcome     = "continuous_nmba_48",
+  exposure    = "lang_cat_7",
+  covariates  = paralytic_covariates,
+  data        = lang_cat_7_non_arf_cohort,
+  model_name  = "non_arf_lang_cat_7_nmbas",
+  cohort_name = "lang_cat_7_non_arf_cohort",
+  project     = current_project,
+  family      = binomial(link = "logit")
+)
+if (!is.null(non_arf_lang_cat_7_nmbas)) {
+  fwrite(extract_glm_results(non_arf_lang_cat_7_nmbas),
+         file.path(rerun_paralytics, paste0(institution, "_paralysis_lang_cat_7_non_arf.csv")))
+  for (tgt in c("spanish", "south_asian", "east_asian", "southeast_asian",
+                "other_asian", "sub_saharan_african", "continental_european_langs",
+                "mena", "all_other_langs")) {
+    fwrite(extract_glm_marginal(
+      model        = non_arf_lang_cat_7_nmbas,
+      data         = lang_cat_7_non_arf_cohort,
+      exposure     = "lang_cat_7",
+      ref_level    = "english",
+      target_level = tgt,
+      n_boot       = 100,
+      site_name    = institution,
+      model_name   = paste0("non_arf_lang_cat_7_nmbas_", tgt),
+      cohort_name  = "lang_cat_7_non_arf_cohort"
+    ), file.path(rerun_paralytics,
+                 paste0(institution, "_paralysis_lang_cat_7_non_arf_marginal_", tgt, ".csv")))
+  }
+}
+
+# ── STEP 4: Pandemic period loop ──────────────────────────────────────────────
+# NOTE: marginal RD only added for lang_cat_6 (binary English/Spanish).
+# Multi-level lang_cats loop over comparators the same way as Steps 1-3 above.
+
+################################################################################
+# Define pandemic-period cohorts for each language category × time period
+# combination. Each base cohort gets filtered by admission_dttm.
+################################################################################
+pandemic_periods <- list(
+  pre_pandemic = list(filter = function(dt) dt[admission_dttm < as.POSIXct("2020-03-01 00:00:00")]),
+  pandemic     = list(filter = function(dt) dt[admission_dttm >= as.POSIXct("2020-03-01 00:00:00") &
+                                               admission_dttm <= as.POSIXct("2021-12-31 23:59:59")]),
+  endemic      = list(filter = function(dt) dt[admission_dttm > as.POSIXct("2021-12-31 23:59:59")])
+)
+
+# Map of which lang_cat to use and which base ARF cohort to filter from
+pandemic_specs <- list(
+  list(lang_var = "lang_cat_1", base_cohort = lang_cat_1_2_arf_cohort),
+  list(lang_var = "lang_cat_2", base_cohort = lang_cat_1_2_arf_cohort),
+  list(lang_var = "lang_cat_3", base_cohort = lang_cat_3_arf_cohort),
+  list(lang_var = "lang_cat_4", base_cohort = lang_cat_4_arf_cohort),
+  list(lang_var = "lang_cat_5", base_cohort = lang_cat_5_arf_cohort),
+  list(lang_var = "lang_cat_6", base_cohort = lang_cat_6_arf_cohort),
+  list(lang_var = "lang_cat_7", base_cohort = lang_cat_7_arf_cohort)
+)
+
+for (spec in pandemic_specs) {
+  for (period_name in names(pandemic_periods)) {
+    
+    cohort_name <- paste0(spec$lang_var, "_arf_", period_name, "_cohort")
+    file_stem   <- paste0(spec$lang_var, "_arf_", period_name, "_cohort")
+    model_name  <- paste0(spec$lang_var, "_arf_", period_name, "_nmbas")
+    out_file    <- paste0(institution, "_paralysis_", spec$lang_var, "_arf_", period_name, ".csv")
+    
+    # Build cohort: filter by period, then re-level
+    period_cohort <- pandemic_periods[[period_name]]$filter(spec$base_cohort)
+    period_cohort <- relevel_paralytic_subgroup(period_cohort)
+    period_cohort[[spec$lang_var]] <- relevel(
+      as.factor(period_cohort[[spec$lang_var]]), ref = "english"
+    )
+    
+    make_table1_pair(
+      dt = period_cohort, by = spec$lang_var, reference_level = "english",
+      cat_vars = cat_vars, cont_vars = cont_vars, site_name = institution,
+      tables_dir = paralytics_tables_dir, institution_prefix = institution,
+      cohort_name = cohort_name, file_stem = file_stem,
+      project = current_project
+    )
+    
+    fit <- fit_model_safe(
+      outcome     = "continuous_nmba_48",
+      exposure    = spec$lang_var,
+      covariates  = paralytic_covariates,
+      data        = period_cohort,
+      model_name  = model_name,
+      cohort_name = cohort_name,
+      project     = current_project,
+      family      = binomial(link = "logit")
+    )
+    if (!is.null(fit)) {
+      fwrite(extract_glm_results(fit),
+             file.path(paralytics_final_data, out_file))
+    }
+    
+    # Save the cohort to the global env so downstream sections (ARF project)
+    # can reference it by the original variable name
+    assign(cohort_name, period_cohort)
+  }
+}
+
+for (spec in pandemic_specs) {
+  for (period_name in names(pandemic_periods)) {
+
+    cohort_name  <- paste0(spec$lang_var, "_arf_", period_name, "_cohort")
+    file_stem    <- paste0(spec$lang_var, "_arf_", period_name, "_cohort")
+    model_name   <- paste0(spec$lang_var, "_arf_", period_name, "_nmbas")
+    out_file     <- paste0(institution, "_paralysis_", spec$lang_var, "_arf_", period_name, ".csv")
+
+    period_cohort <- pandemic_periods[[period_name]]$filter(spec$base_cohort)
+    period_cohort <- relevel_paralytic_subgroup(period_cohort)
+    period_cohort[[spec$lang_var]] <- relevel(
+      as.factor(period_cohort[[spec$lang_var]]), ref = "english"
+    )
+
+    fit <- fit_model_safe(
+      outcome     = "continuous_nmba_48",
+      exposure    = spec$lang_var,
+      covariates  = paralytic_covariates,
+      data        = period_cohort,
+      model_name  = model_name,
+      cohort_name = cohort_name,
+      project     = current_project,
+      family      = binomial(link = "logit")
+    )
+    if (!is.null(fit)) {
+      fwrite(extract_glm_results(fit),
+             file.path(rerun_paralytics, out_file))
+
+      # Define comparators based on lang_cat
+      comparators <- switch(spec$lang_var,
+        "lang_cat_1" = "non-english",
+        "lang_cat_2" = c("spanish", "other non-english"),
+        "lang_cat_3" = c("spanish", "third_lang_cat"),
+        "lang_cat_4" = c("spanish", "chinese", "vietnamese"),
+        "lang_cat_5" = c("spanish", "south_asian", "east_asian", "southeast_asian",
+                         "continental_european_langs", "mena"),
+        "lang_cat_6" = "spanish",
+        "lang_cat_7" = c("spanish", "south_asian", "east_asian", "southeast_asian",
+                         "other_asian", "sub_saharan_african", "continental_european_langs",
+                         "mena", "all_other_langs")
+      )
+
+      for (tgt in comparators) {
+        marginal_file <- paste0(
+          institution, "_paralysis_", spec$lang_var, "_arf_", period_name,
+          "_marginal_", gsub(" ", "_", tgt), ".csv"
+        )
+        tryCatch(
+          fwrite(extract_glm_marginal(
+            model        = fit,
+            data         = period_cohort,
+            exposure     = spec$lang_var,
+            ref_level    = "english",
+            target_level = tgt,
+            n_boot       = 100,
+            site_name    = institution,
+            model_name   = paste0(model_name, "_", gsub(" ", "_", tgt)),
+            cohort_name  = cohort_name
+          ), file.path(rerun_paralytics, marginal_file)),
+          error = function(e) message(
+            "Skipping marginal for ", spec$lang_var, " / ", period_name,
+            " / ", tgt, ": ", conditionMessage(e)
+          )
+        )
+      }
+    }
+    assign(cohort_name, period_cohort)
+  }
+}
+
+# ── STEP 5: Exploratory analyses ──────────────────────────────────────────────
+# NOTE: Interaction models cannot use extract_glm_marginal directly — marginal
+# standardization with interaction terms requires specifying which variable is
+# being standardized over, which is not supported by the current function.
+# extract_glm_results only for those models.
+exploratory_covariates_paralytic <- c(
+  "race_category", "lang_cat_1", "age_category", "bmi", "sex_category",
+  "factor(hospital_icu_id)", "elixhauser_score", "laps2",
+  "factor(observation_year)"
+)
+
+# cat_vars used in this block excludes ethnicity_category since it's the `by`
+cat_vars_explore_ethn <- c("sex_category", "race_category", "lang_cat_1",
+                           "hospital_id", "icu_imv", "location_of_intubation",
+                           "admission_type_category", "arf_flag", "aHrf_flag")
+
+# Run the same pattern across the three subcohorts
+ethnicity_specs <- list(
+  list(name = "all_imv", data = paralytic_exploratory_analysis,         model_name = "ethnicity_all_imv_nmbas"),
+  list(name = "arf",     data = arf_paralytic_exploratory_analysis,     model_name = "ethnicity_arf_nmbas"),
+  list(name = "non_arf", data = non_arf_paralytic_exploratory_analysis, model_name = "ethnicity_non_arf_nmbas")
+)
+
+for (spec in ethnicity_specs) {
+  fit <- fit_model_safe(
+    outcome     = "continuous_nmba_48",
+    exposure    = "ethnicity_category_final",
+    covariates  = exploratory_covariates_paralytic,
+    data        = spec$data,
+    model_name  = spec$model_name,
+    cohort_name = paste0("paralytic_ethnicity_", spec$name),
+    project     = current_project,
+    family      = binomial(link = "logit")
+  )
+  if (!is.null(fit)) {
+    fwrite(extract_glm_results(fit),
+           file.path(rerun_paralytics,
+                     paste0(institution, "_paralysis_ethnicity_", spec$name, ".csv")))
+    for (tgt in c("hispanic")) {
+      tryCatch(
+        fwrite(extract_glm_marginal(
+          model        = fit,
+          data         = spec$data,
+          exposure     = "ethnicity_category_final",
+          ref_level    = "non-hispanic/unknown",
+          target_level = tgt,
+          n_boot       = 100,
+          site_name    = institution,
+          model_name   = paste0(spec$model_name, "_", tgt),
+          cohort_name  = paste0("paralytic_ethnicity_", spec$name)
+        ), file.path(rerun_paralytics,
+                     paste0(institution, "_paralysis_ethnicity_", spec$name,
+                            "_marginal_", tgt, ".csv"))),
+        error = function(e) message(
+          "Skipping marginal ethnicity ", spec$name, " / ", tgt, ": ", conditionMessage(e)
+        )
+      )
+    }
+  }
+}
+cat_vars_explore_race <- c("sex_category", "ethnicity_category_final", "lang_cat_1",
+                           "hospital_id", "icu_imv", "location_of_intubation",
+                           "admission_type_category", "arf_flag", "aHrf_flag")
+
+# Race covariates: race is exposure, so use ethnicity_category in covariates instead
+race_covariates_paralytic <- c(
+  "ethnicity_category_final", "lang_cat_1", "age_category", "bmi", "sex_category",
+  "factor(hospital_icu_id)", "elixhauser_score", "laps2",
+  "factor(observation_year)"
+)
+
+race_specs <- list(
+  list(name = "all_imv", data = paralytic_exploratory_analysis,         model_name = "race_all_imv_nmbas"),
+  list(name = "arf",     data = arf_paralytic_exploratory_analysis,     model_name = "race_arf_nmbas"),
+  list(name = "non_arf", data = non_arf_paralytic_exploratory_analysis, model_name = "race_non_arf_nmbas")
+)
+
+for (spec in race_specs) {
+  fit <- fit_model_safe(
+    outcome     = "continuous_nmba_48",
+    exposure    = "race_category",
+    covariates  = race_covariates_paralytic,
+    data        = spec$data,
+    model_name  = spec$model_name,
+    cohort_name = paste0("paralytic_race_", spec$name),
+    project     = current_project,
+    family      = binomial(link = "logit")
+  )
+  if (!is.null(fit)) {
+    fwrite(extract_glm_results(fit),
+           file.path(rerun_paralytics,
+                     paste0(institution, "_paralysis_race_", spec$name, ".csv")))
+    for (tgt in c("black", "hispanic", "asian", "other/unknown")) {
+      tryCatch(
+        fwrite(extract_glm_marginal(
+          model        = fit,
+          data         = spec$data,
+          exposure     = "race_category",
+          ref_level    = "white",
+          target_level = tgt,
+          n_boot       = 100,
+          site_name    = institution,
+          model_name   = paste0(spec$model_name, "_", gsub("/| ", "_", tgt)),
+          cohort_name  = paste0("paralytic_race_", spec$name)
+        ), file.path(rerun_paralytics,
+                     paste0(institution, "_paralysis_race_", spec$name,
+                            "_marginal_", gsub("/| ", "_", tgt), ".csv"))),
+        error = function(e) message(
+          "Skipping marginal race ", spec$name, " / ", tgt, ": ", conditionMessage(e)
+        )
+      )
+    }
+  }
+}
+
+cat_vars_explore_sex <- c("ethnicity_category_final", "race_category", "lang_cat_1",
+                          "hospital_id", "icu_imv", "location_of_intubation",
+                          "admission_type_category", "arf_flag", "aHrf_flag")
+
+# Sex covariates: sex is exposure, race + ethnicity stay as covariates
+sex_covariates_paralytic <- c(
+  "race_category", "ethnicity_category_final", "lang_cat_1", "age_category", "bmi",
+  "factor(hospital_icu_id)", "elixhauser_score", "laps2",
+  "factor(observation_year)"
+)
+
+sex_specs <- list(
+  list(name = "all_imv", data = paralytic_exploratory_analysis,         model_name = "sex_all_imv_nmbas"),
+  list(name = "arf",     data = arf_paralytic_exploratory_analysis,     model_name = "sex_arf_nmbas"),
+  list(name = "non_arf", data = non_arf_paralytic_exploratory_analysis, model_name = "sex_non_arf_nmbas")
+)
+
+for (spec in sex_specs) {
+  fit <- fit_model_safe(
+    outcome     = "continuous_nmba_48",
+    exposure    = "sex_category",
+    covariates  = sex_covariates_paralytic,
+    data        = spec$data,
+    model_name  = spec$model_name,
+    cohort_name = paste0("paralytic_sex_", spec$name),
+    project     = current_project,
+    family      = binomial(link = "logit")
+  )
+  if (!is.null(fit)) {
+    fwrite(extract_glm_results(fit),
+           file.path(rerun_paralytics,
+                     paste0(institution, "_paralysis_sex_", spec$name, ".csv")))
+    tryCatch(
+      fwrite(extract_glm_marginal(
+        model        = fit,
+        data         = spec$data,
+        exposure     = "sex_category",
+        ref_level    = "male",
+        target_level = "female",
+        n_boot       = 100,
+        site_name    = institution,
+        model_name   = paste0(spec$model_name, "_female"),
+        cohort_name  = paste0("paralytic_sex_", spec$name)
+      ), file.path(rerun_paralytics,
+                   paste0(institution, "_paralysis_sex_", spec$name, "_marginal_female.csv"))),
+      error = function(e) message(
+        "Skipping marginal sex ", spec$name, ": ", conditionMessage(e)
+      )
+    )
+  }
+}
+
+# Interaction models — extract_glm_results only, marginal not applicable
+if (!is.null(paralytic_model_total_cohort_race_language_interaction)) {
+  fwrite(extract_glm_results(paralytic_model_total_cohort_race_language_interaction),
+         file.path(rerun_paralytics,
+                   paste0(institution, "_paralytic_model_total_cohort_race_language_interaction.csv")))
+}
+if (!is.null(paralytic_model_total_cohort_ethnicity_language_interaction)) {
+  fwrite(extract_glm_results(paralytic_model_total_cohort_ethnicity_language_interaction),
+         file.path(rerun_paralytics,
+                   paste0(institution, "_paralytic_model_total_cohort_ethnicity_language_interaction.csv")))
+}
+if (!is.null(paralytic_model_arf_cohort_race_language_interaction)) {
+  fwrite(extract_glm_results(paralytic_model_arf_cohort_race_language_interaction),
+         file.path(rerun_paralytics,
+                   paste0(institution, "_paralytic_model_arf_cohort_race_language_interaction.csv")))
+}
+if (!is.null(paralytic_model_arf_cohort_ethnicity_language_interaction)) {
+  fwrite(extract_glm_results(paralytic_model_arf_cohort_ethnicity_language_interaction),
+         file.path(rerun_paralytics,
+                   paste0(institution, "_paralytic_model_arf_cohort_ethnicity_language_interaction.csv")))
+}
+
+```
