@@ -3610,25 +3610,25 @@ for (spec in sex_specs) {
 }
 
 # Interaction models — extract_glm_results only, marginal not applicable
-if (!is.null(paralytic_model_total_cohort_race_language_interaction)) {
-  fwrite(extract_glm_results(paralytic_model_total_cohort_race_language_interaction),
-         file.path(rerun_paralytics,
-                   paste0(institution, "_paralytic_model_total_cohort_race_language_interaction.csv")))
-}
-if (!is.null(paralytic_model_total_cohort_ethnicity_language_interaction)) {
-  fwrite(extract_glm_results(paralytic_model_total_cohort_ethnicity_language_interaction),
-         file.path(rerun_paralytics,
-                   paste0(institution, "_paralytic_model_total_cohort_ethnicity_language_interaction.csv")))
-}
-if (!is.null(paralytic_model_arf_cohort_race_language_interaction)) {
-  fwrite(extract_glm_results(paralytic_model_arf_cohort_race_language_interaction),
-         file.path(rerun_paralytics,
-                   paste0(institution, "_paralytic_model_arf_cohort_race_language_interaction.csv")))
-}
-if (!is.null(paralytic_model_arf_cohort_ethnicity_language_interaction)) {
-  fwrite(extract_glm_results(paralytic_model_arf_cohort_ethnicity_language_interaction),
-         file.path(rerun_paralytics,
-                   paste0(institution, "_paralytic_model_arf_cohort_ethnicity_language_interaction.csv")))
+#if (!is.null(paralytic_model_total_cohort_race_language_interaction)) {
+#  fwrite(extract_glm_results(paralytic_model_total_cohort_race_language_interaction),
+#         file.path(rerun_paralytics,
+#                   paste0(institution, "_paralytic_model_total_cohort_race_language_interaction.csv")))
+#}
+#if (!is.null(paralytic_model_total_cohort_ethnicity_language_interaction)) {
+#  fwrite(extract_glm_results(paralytic_model_total_cohort_ethnicity_language_interaction),
+#         file.path(rerun_paralytics,
+#                   paste0(institution, "_paralytic_model_total_cohort_ethnicity_language_interaction.csv")))
+#}
+#if (!is.null(paralytic_model_arf_cohort_race_language_interaction)) {
+#  fwrite(extract_glm_results(paralytic_model_arf_cohort_race_language_interaction),
+#         file.path(rerun_paralytics,
+#                   paste0(institution, "_paralytic_model_arf_cohort_race_language_interaction.csv")))
+#}
+##if (!is.null(paralytic_model_arf_cohort_ethnicity_language_interaction)) {
+#  fwrite(extract_glm_results(paralytic_model_arf_cohort_ethnicity_language_interaction),
+#         file.path(rerun_paralytics,
+#                   paste0(institution, "_paralytic_model_arf_cohort_ethnicity_language_interaction.csv")))
 }
 
 ```
