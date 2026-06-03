@@ -3629,6 +3629,6 @@ for (spec in sex_specs) {
 #  fwrite(extract_glm_results(paralytic_model_arf_cohort_ethnicity_language_interaction),
 #         file.path(rerun_paralytics,
 #                   paste0(institution, "_paralytic_model_arf_cohort_ethnicity_language_interaction.csv")))
-}
+#}
 
 ```
