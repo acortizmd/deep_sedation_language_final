@@ -146,6 +146,94 @@ total_cohort[
   race_category := "other/unknown"
 ]
 total_cohort[, observation_year := as.double(observation_year)]
+
+# ---- Missingness Scan for Key Covariates -----------------------------------
+# Scans the variables used across the IPW model and the standard/paralytic/
+# measurements/exploratory covariate sets for NAs. Writes one row per variable
+# with n_missing / pct_missing, so a single missing value (like the laps2 case)
+# gets caught automatically at every site instead of by manual digging.
+# Also writes out the specific hospitalization_ids affected, in case any of
+# these turn out to be a data-quality issue worth investigating rather than
+# just imputing over.
+
+vars_to_check <- c(
+  # demographic / outcome-adjacent covariates used across models
+  "age_category", "age_at_admission", "sex_category", "race_category",
+  "ethnicity_category", "ethnicity_category_final", "bmi",
+  # severity / utilization scores
+  "laps2", "elixhauser_score", "SVM_SCORE",
+  # site / unit identifiers used as covariates or strata
+  "hospital_id", "hospital_type", "hospital_icu_id", "icu_imv",
+  "observation_year",
+  # measurements-project-specific covariates
+  "location_of_intubation", "time_from_begin_imv_to_icu_hours",
+  # language variables (needed for cohort definitions downstream)
+  "language_category"
+)
+
+vars_present <- intersect(vars_to_check, names(total_cohort))
+vars_missing_from_data <- setdiff(vars_to_check, names(total_cohort))
+
+if (length(vars_missing_from_data) > 0) {
+  message(institution, ": these expected variables are not present in total_cohort and were skipped: ",
+          paste(vars_missing_from_data, collapse = ", "))
+}
+
+missingness_summary <- rbindlist(lapply(vars_present, function(v) {
+  x <- total_cohort[[v]]
+  n_na <- sum(is.na(x))
+  data.table(
+    site         = institution,
+    variable     = v,
+    n_total      = nrow(total_cohort),
+    n_missing    = n_na,
+    pct_missing  = 100 * n_na / nrow(total_cohort)
+  )
+}), fill = TRUE)
+
+setorder(missingness_summary, -n_missing)
+
+fwrite(missingness_summary,
+       file.path(cohort_characteristics,
+                 paste0(institution, "_covariate_missingness_summary.csv")))
+
+# ---- Row-level detail: which hospitalizations are affected, and by which
+# variable(s). Useful for spotting whether missingness clusters in a handful
+# of encounters (possible data quality issue) vs. is scattered/random.
+vars_with_missing <- missingness_summary[n_missing > 0, variable]
+
+if (length(vars_with_missing) > 0) {
+  missingness_detail <- rbindlist(lapply(vars_with_missing, function(v) {
+    ids <- total_cohort[is.na(get(v)), hospitalization_id]
+    if (length(ids) == 0) return(NULL)
+    data.table(
+      site               = institution,
+      variable           = v,
+      hospitalization_id = ids
+    )
+  }), fill = TRUE)
+
+  fwrite(missingness_detail,
+         file.path(iptw_diagnostics_dir,
+                   paste0(institution, "_covariate_missingness_detail.csv")))
+
+  message(institution, ": missingness detected in ", length(vars_with_missing),
+          " variable(s) — see ", institution, "_covariate_missingness_summary.csv",
+          " and ", institution, "_covariate_missingness_detail.csv")
+  print(missingness_summary[n_missing > 0])
+} else {
+  message(institution, ": no missing values detected in checked covariates")
+}
+
+# ---- Impute missing laps2 with site median -------------------------------
+if (any(is.na(total_cohort$laps2))) {
+  n_missing_laps2  <- sum(is.na(total_cohort$laps2))
+  median_laps2     <- median(total_cohort$laps2, na.rm = TRUE)
+  message(institution, ": imputing ", n_missing_laps2,
+          " missing laps2 value(s) with site median (", median_laps2, ")")
+  total_cohort[is.na(laps2), laps2 := median_laps2]
+}
+
 # Upload hospital system language information
 language_data <- fread(paste0(cohort_characteristics, "/", institution, "_hospital_system_language_counts", ".csv"))
 setDT(language_data)
@@ -1700,13 +1788,6 @@ total_cohort[, lang_cat_3 := fcase(
   default = NA_character_
 )]
 
-third_lang_crosswalk <- data.table(
-  institution        = institution,
-  third_lang_cat     = third_lang
-)
-fwrite(third_lang_crosswalk,
-       file.path(cohort_characteristics, 
-                 paste0(institution, "_third_lang_crosswalk.csv")))
 
 # 4: English v Spanish v Chinese v Vietnamese (three non-English languages with the most evidence supporting the existence of health disparities) - all others NA
 total_cohort[, lang_cat_4 := fcase(
